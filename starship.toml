@@ -1,0 +1,72 @@
+format = '$directory $git_branch $character'
+
+[character]
+success_symbol = "[➜](#FFC87A) "
+error_symbol   = "[✗](#FA5F1A) "
+
+[directory]
+style = "#F7F2E9"
+read_only = " 󰌾"
+truncation_length = 0
+truncate_to_repo = false
+
+[git_branch]
+style  = "#F7F2E9"
+format = '[$symbol$branch(:$remote_branch)]($style)'
+symbol = ' '
+
+[docker_context]
+symbol = " "
+
+[package]
+symbol = "󰏗 "
+
+[aws]
+symbol = "  "
+
+[ruby]
+symbol = " "
+
+[python]
+symbol = " "
+
+[os.symbols]
+Alpaquita = " "
+Alpine = " "
+Amazon = " "
+Android = " "
+Arch = " "
+Artix = " "
+CentOS = " "
+Debian = " "
+DragonFly = " "
+Emscripten = " "
+EndeavourOS = " "
+Fedora = " "
+FreeBSD = " "
+Garuda = "󰛓 "
+Gentoo = " "
+HardenedBSD = "󰞌 "
+Illumos = "󰈸 "
+Linux = " "
+Mabox = " "
+Macos = " "
+Manjaro = " "
+Mariner = " "
+MidnightBSD = " "
+Mint = " "
+NetBSD = " "
+NixOS = " "
+OpenBSD = "󰈺 "
+openSUSE = " "
+OracleLinux = "󰌷 "
+Pop = " "
+Raspbian = " "
+Redhat = " "
+RedHatEnterprise = " "
+Redox = "󰀘 "
+Solus = "󰠳 "
+SUSE = " "
+Ubuntu = " "
+Unknown = " "
+Windows = "󰍲 "
