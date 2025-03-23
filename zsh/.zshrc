@@ -3,6 +3,7 @@ alias -g @lf='| less +F'
 alias -g @repo='echo "~/Repository"'
 
 # git
+export PATH=/usr/local/bin/git:$PATH
 alias gb='echo $(git rev-parse --abbrev-ref HEAD)'
 alias gb_like='git branch @g $1'
 alias gc='git checkout $1'
@@ -13,10 +14,7 @@ alias gtree='git log --graph -30 --format="%x09%an%x09%h %d"'
 alias gs='git status -s | cut -c4-'
 alias gds='git diff --name-only origin/master'
 alias gdc="git diff --stat -w -B -I '^\s*\/' origin/master"
-alias gcommit='(){~/Script/cmd/commit $1}'
-
-# mysql
-alias mysql_bk_dev='mysql -h 127.0.0.1 -u root -P 3316 --password'
+alias gcomi='(){~/Script/cmd/commit $1}'
 
 # todo.sh
 alias todo='todo.sh'
