@@ -12,7 +12,6 @@ cask "visual-studio-code"
 cask "claude-code"
 cask "clipy"
 cask "gitkraken"
-cask "postman"
 
 # フォント
 cask "font-fira-code-nerd-font"

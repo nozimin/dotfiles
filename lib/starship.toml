@@ -1,12 +1,12 @@
-format = '$directory $git_branch $character'
+format = '$directory$git_branch$character'
 right_format = '$time'
 
 [character]
-success_symbol = "[➜](#FFC87A) "
-error_symbol   = "[✗](#FA5F1A) "
+success_symbol = "[->](#FFC87A) "
+error_symbol   = "[x](#FA5F1A) "
 
 [directory]
-style = "#F7F2E9"
+style = "#FFA649"
 read_only = " 󰌾"
 truncation_length = 1
 fish_style_pwd_dir_length = 1
@@ -14,14 +14,14 @@ truncate_to_repo = false
 
 [time]
 disabled = false
-style = "#F7F2E9"
+style = "#FFA649"
 time_format = "%Y-%m-%dT%H:%M:%S%:z"
 format = '[$time]($style)'
 
 [git_branch]
-style  = "#F7F2E9"
-format = '[$symbol$branch(:$remote_branch)]($style)'
-symbol = ' '
+style  = "#FFA649"
+format = '[$symbol$branch(:$remote_branch)]($style) '
+symbol = ': '
 
 [docker_context]
 symbol = " "
