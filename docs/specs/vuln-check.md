@@ -138,6 +138,8 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 | `macos` | `softwareupdate --list` | `softwareupdate` |
 | `ruby` | endoflife.date（同じサイクルの最新パッチと EOL） | `endoflife` |
 
+- エンベロープは取得元ごとに出し、`source` は `method` と同じ名前（`brew-api` / `cask-api` / `itunes` / `softwareupdate` / `endoflife`）。`count` は取得元から読み取った件数（formula の JSON の数、cask の全件数、iTunes の結果の件数、softwareupdate の更新の件数、endoflife のサイクルの数）、照合した件数は `evidence.checked`。
+- `macos` は `compare` を使わず、`softwareupdate --list` に出ていれば `outdated: true` とする（`27.2 (a)` のような Rapid Security Response は `compare` では区別できないため）。
 - 対応付けできなかった項目は `method: "unmapped"`、`latest: null` として出し、エンベロープを `warn` にする。AI がベンダーのページで最新版を調べる（§8.2）。
 - `update_command` は分かる範囲で入れる（例: `brew upgrade <formula>`、`brew upgrade --cask <cask>`、App Store、アプリ内の更新、`softwareupdate`）。
 
@@ -198,6 +200,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 | P2 | 上記以外（CVSS 7.0 以上、EOL、それ未満、ローカルからのみ攻撃可能、Malware 以外の種別で削除された拡張） | 次に更新するとき |
 
 - KEV、CVSS、EOL、削除種別は取得したデータでそのまま判定する。
+- CVSS のスコアが無い（OSV が CVSS v4 のベクターしか返さず `score: null` など）ときは、GHSA の重大度（`rating`）で代える: `CRITICAL` は 9.0 以上、`HIGH` は 7.0 以上として扱う。どちらも無いときだけ、AI が NVD などでスコアを確かめ、確かめた URL を根拠に書く。
 - 「信頼できない入力を扱うアプリ」（ブラウザ、チャット、メール、PDF、メディア、Docker など）に当たるかは AI が判断し、理由をレポートに書く。
 - EPSS は使わない。
 
@@ -270,7 +273,7 @@ P1 [継続] Postman 11.44.0 → 12.34.0
 ## 12. 試験（`tests/run`）
 
 1. shellcheck: `scripts/vulncheck` と `tests/run` が警告なしで通る。
-2. 故障注入: 各外部ソースについて、存在しない URL に向けると `status: "error"`、空のファイル（`file://`）に向けると `status: "warn"` になる。
+2. 故障注入: 各外部ソースについて、存在しない URL に向けると `status: "error"`、空のファイル（`file://`）に向けると `status: "warn"` になる。ベース URL のソース（OSV、formula、endoflife）は、読むパス（`v1/querybatch`、`<formula>.json`、`ruby.json` など）に空のファイルを置いたディレクトリに向ける。`softwareupdate` は URL ではないので、偽のコマンドを `PATH` の先頭に置いて確かめる。
 3. 既知の陽性: インベントリを差し替え、npm の `lodash@4.17.15` を入れると `osv` が脆弱性を返す。
 4. `compare`: `1.9.5 lt 1.10.0`、`156.0.8078.9 lt 156.0.8078.81`、`77.1 lt 77.1_1`、`5.10.2 GM (b5299, 5a516b44) eq 5.10.2`、`1.2.3-beta lt 1.2.3`、`1.2.3-alpha` と `1.2.3-beta` は終了コード 2、数字でない入力は終了コード 2。
 5. RSS の取得範囲: `VULNCHECK_NOW` と、範囲が 30 日に満たない RSS のフィクスチャで `warn` になる。
