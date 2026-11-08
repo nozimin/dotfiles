@@ -258,6 +258,7 @@ P1 [継続] Postman 11.44.0 → 12.34.0
   - formulae.brew.sh: formula 名（URL に入る）
   - iTunes Lookup: App Store のアプリの bundle id
   - WebSearch / WebFetch: AI がリリースノートなどを調べるときの、アプリ名とバージョン
+  - Claude（Anthropic）: インベントリとスクリプトの出力は、Claude との会話の内容として送られる
 
 ## 12. 試験（`tests/run`）
 
