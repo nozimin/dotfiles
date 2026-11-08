@@ -6,9 +6,9 @@
 2. `~/.zprofile` に `brew shellenv` を含む行がなければ、確認してから次を追記する。
 
    ```zsh
-   # >>> config_for_mac: homebrew >>>
+   # >>> dotfiles: homebrew >>>
    eval "$(/opt/homebrew/bin/brew shellenv)"
-   # <<< config_for_mac: homebrew <<<
+   # <<< dotfiles: homebrew <<<
    ```
 
    Intel Mac では `/usr/local/bin/brew` になる。

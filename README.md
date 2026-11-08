@@ -1,4 +1,4 @@
-# config_for_mac
+# dotfiles
 
 Mac の開発環境の設定ファイルと、それをセットアップするスクリプト。
 
@@ -7,8 +7,8 @@ Mac の開発環境の設定ファイルと、それをセットアップする�
 新しい Mac で次を実行し、表示される質問に答える（Enter のみは Yes）。
 
 ```sh
-git clone https://github.com/nozimin/config_for_mac.git ~/WorkSpace/Repositories/config_for_mac
-~/WorkSpace/Repositories/config_for_mac/cmd/setup
+git clone https://github.com/nozimin/dotfiles.git ~/WorkSpace/Repositories/dotfiles
+~/WorkSpace/Repositories/dotfiles/cmd/setup
 ```
 
 - `git clone` の初回は Xcode Command Line Tools のインストールダイアログが出るので、インストールしてからやり直す。

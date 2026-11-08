@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck disable=SC2034
 LIB_DIR="$REPO_ROOT/lib"
 # shellcheck disable=SC2034
-MARKER="config_for_mac"
+MARKER="dotfiles"
 
 if [ -t 1 ]; then
   C_BLUE=$'\033[1;34m' C_GREEN=$'\033[1;32m' C_YELLOW=$'\033[1;33m' C_RED=$'\033[1;31m' C_RESET=$'\033[0m'

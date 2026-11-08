@@ -1,4 +1,4 @@
-# config_for_mac の共通 zsh 設定
+# dotfiles の共通 zsh 設定
 # ~/.zshrc から source して使う（cmd/setup が追記する）
 
 # 補完（brew shellenv が fpath に追加した補完も読み込む）

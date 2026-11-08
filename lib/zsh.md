@@ -5,9 +5,9 @@
 `~/.zshrc` の末尾に、確認してから次のブロックを追記する。パスはリポジトリの場所から決まる。
 
 ```zsh
-# >>> config_for_mac >>>
-source "/path/to/config_for_mac/lib/zshrc"
-# <<< config_for_mac <<<
+# >>> dotfiles >>>
+source "/path/to/dotfiles/lib/zshrc"
+# <<< dotfiles <<<
 ```
 
 `~/.zshrc` 自体はマシンごとの実ファイルのまま残す。全マシン共通の設定は `lib/zshrc` に書き、マシン固有の設定は `~/.zshrc` に直接書く。
@@ -23,9 +23,9 @@ source "/path/to/config_for_mac/lib/zshrc"
 ## 手動でやる場合
 
 ```sh
-printf '\n# >>> config_for_mac >>>\nsource "%s/lib/zshrc"\n# <<< config_for_mac <<<\n' "$(pwd)" >> ~/.zshrc
+printf '\n# >>> dotfiles >>>\nsource "%s/lib/zshrc"\n# <<< dotfiles <<<\n' "$(pwd)" >> ~/.zshrc
 ```
 
 ## リポジトリを移動したとき
 
-移動先の `cmd/setup` を実行すると、`config_for_mac` ブロックが古いパスを指していれば、差分を表示して書き換えるかを確認される。ブロックの外は変更しない。
+移動先の `cmd/setup` を実行すると、`dotfiles` ブロックが古いパスを指していれば、差分を表示して書き換えるかを確認される。ブロックの外は変更しない。
