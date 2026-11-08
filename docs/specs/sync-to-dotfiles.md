@@ -23,7 +23,7 @@
 
 ## 3. 起動
 
-- frontmatter: `name: sync-to-dotfiles`、`disable-model-invocation: true`、description は日本語。
+- frontmatter: `name: sync-to-dotfiles`、`disable-model-invocation: true`、`argument-hint`（例: `[追加したいツール]`）、description は日本語。
 - `/sync-to-dotfiles` で手動起動したときだけ動く。dotfiles リポジトリで Claude Code を起動して使う。
 - 引数（任意）: 管理に加えたいツール（例: `/sync-to-dotfiles VS Code も入れて`）。引数なしなら差分の確認だけ。
 
@@ -105,19 +105,25 @@ ignored: 1
 | `garbage` | 1000 文字以上の行、または 100 文字以上の空白だけの行がある | 取り込むときにその行を消す |
 | `in-dotfiles` | 段落のコメントでない行が、すべて `lib/zshrc` に既にある（前後の空白を除いて比べる） | 共通化（dotfiles にあるので、ローカルから消すだけ） |
 
+複数のフラグが立ったときは `secret` > `in-dotfiles` > `missing-path` > `home-path` の順に優先する。`garbage` は、おすすめとは別に「取り込むときにその行を消す」という但し書きとして扱う。
+
 ## 7. 除外リスト
 
 - 場所: `~/.config/dotfiles/ignore`。Mac ごとに持ち、リポジトリには入れない。
 - 形式: 1 行に 1 つ、§5 の `id` をそのまま書く。空行と `#` で始まる行は無視する。
 - collect は、`id` が完全に一致する項目を出さず、`ignored` に数える。ファイルが無ければ除外なしとして扱う。
-- skill は、ユーザーが「ローカル専用」にした項目の `id` を追記する（ディレクトリが無ければ作る）。
+- skill は、ユーザーが「ローカル専用」にした項目の `id` を `${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}` に追記する（ディレクトリが無ければ作る）。
 
 ## 8. skill の流れ
+
+§9 のツールの追加を頼まれたときは、1〜4 → §9 → 5 の順に行い、push の確認は最後に 1 回だけにする。
 
 1. **開始時の確認**: `collect` を実行する。
    - `branch` が `main` でなければ止める。
    - `dirty` があれば止め、そのファイルを伝える。
-   - `behind` が 1 以上なら、AskUserQuestion で `git pull --ff-only` するかを聞き（おすすめは pull する）、pull したら `collect` を実行し直す。`unknown` なら、そのことを伝えて続けるかを聞く。
+   - `behind` が 1 以上なら、AskUserQuestion で `git pull --ff-only` するかを聞き（おすすめは pull する）、pull したら `collect` を実行し直す。pull しないと答えたら、最後の push が拒否されうることを伝えて続ける。`pull --ff-only` が失敗したら（分岐しているとき）止めて伝える。
+   - `behind` が `unknown` なら、そのことを伝えて続けるかを聞く。
+   - `ahead` が 1 以上なら、そのコミットも最後の push に含まれることを伝える。
 2. **表で選んでもらう**: 項目をエリア（Brewfile、zsh、`lib/` の変更、逆向きの差分）ごとに番号付きの表にする。各項目に、おすすめ（共通化／ローカル専用／保留）と理由を付ける。ユーザーは変えたい番号だけ答える。
    - おすすめは §6 のフラグに従う。フラグが無い項目は、内容から Claude が判断する。
    - `secret` の項目は共通化を選べない。
@@ -139,12 +145,12 @@ ignored: 1
 
 1. README の「ツールを追加する」の手順で行う: 設定ファイルを `lib/` に置く、`cmd/setup` に冪等な `setup_<tool>` を足して手順の並びに加える、`lib/<tool>.md` を書く、README の表に 1 行足す。
 2. 反映方法をツールごとに提案し、確認する:
-   - 原則はシンボリックリンク（`lib/<tool>/` に移し、元の場所をリンクにする。starship と同じ）。以後のローカルの変更は `lib` の未コミットの変更として §8 で出てくる。
-   - Mac ごとの値が混ざるファイルは、ツールの include 機能を使う（例: git は `~/.gitconfig` に `[include] path = .../lib/gitconfig`）。
+   - 原則はシンボリックリンク（設定ファイルを `lib/` にコピーし、元のファイルは `cmd/setup` の `link_file` が退避してリンクにする。starship と同じ）。以後のローカルの変更は `lib` の未コミットの変更として §8 で出てくる。
+   - Mac ごとの値や秘密情報が混ざるファイルは、ツールの include 機能を使う（例: git は `~/.gitconfig` に `[include] path = .../lib/gitconfig`）。シンボリックリンクにすると、秘密情報を除いた内容でローカルのファイルが置き換わるため。
    - ツールがシンボリックリンクを保つか（書き換えるときにリンクを普通のファイルに置き換えないか）を確かめ、保たないなら別の方式にする。
 3. include 方式のように `lib` の変更として出てこないものは、そのツール用の検出を `collect` に足す（§5 の形式で出す）。
 4. 秘密情報（§6 の `secret`）と壊れた内容（`garbage`）は取り込まない。
-5. ユーザーにセッション内で `! <リポジトリ>/cmd/setup` を実行してもらい、ローカルのファイルがリンクなどに切り替わったことを確認してから、§8 の 4、5 で commit と push をする。
+5. ユーザーに別のターミナル（Terminal.app）で `<リポジトリ>/cmd/setup` を実行してもらい（Claude Code の `!` では `cmd/setup` の質問に答えられないため）、ローカルのファイルがリンクなどに切り替わったことを Claude が確認してから、§8 の 4、5 で commit と push をする。
 
 ## 10. README
 
