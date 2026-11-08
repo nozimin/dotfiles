@@ -138,25 +138,25 @@ ignored: 1
    - `secret` の項目は共通化を選べない。
    - 逆向きの差分（`direction: dotfiles`）は別セクションにし、選択肢は「残す」（デフォルト）と「dotfiles から削除」。
    - `lib` の項目は「commit／破棄（`git restore`）／保留」。
-   - 項目が 0 件なら、そう伝えて終わる（§9 の依頼があればそちらに進む）。
+   - 項目が 0 件なら、そう伝えて 3 と 4 を飛ばし、5 に進む（§9 の依頼があればそれを行う。push するものが無ければ終わる）。
 3. **反映**:
    - Brewfile: 既存のセクション（`# CLI`、`# アプリ`、`# フォント`）の適切な場所に足す。合うものが無ければセクションを足す。「dotfiles から削除」は行を消す。
    - zsh: `lib/zshrc` に足す。ツールに依存する行は `command -v <tool>` でガードする（README の約束）。`home-path` は `$HOME` か `~` に書き換え、`garbage` の行は消す。`zprofile` から取り込むものも `lib/zshrc` に入れる（`lib/zprofile` は作らない）。
    - 取り込んだ（または `in-dotfiles` だった）段落は、ローカルの `~/.zshrc` / `~/.zprofile` から消す。消す前に差分を見せて確認し、`<ファイル>.backup-YYYYmmddHHMMSS` に退避する。
-   - `lib` の「破棄」は `git restore`（未追跡なら削除）。iTerm2 の plist は、iTerm2 が起動中だと終了時に書き戻されることを伝える。
+   - `lib` の「破棄」は `git restore --source=HEAD --staged --worktree`（stage した変更も戻すため。未追跡なら削除）。iTerm2 の plist は、iTerm2 が起動中だと終了時に書き戻されることを伝える。
    - 「ローカル専用」は除外リストに追記する。「保留」は何もしない（次回また出る）。
-4. **commit**: `git diff` を見せて確認してから、エリアごとに分けて `main` に直接 commit する（個人用の dotfiles なのでブランチや PR は作らない）。メッセージは `[feat]` `[fix]` `[del]` + 日本語（例: `[feat] Brewfile に actionlint などを追加`）。
-5. **push**: AskUserQuestion で `origin main` に push するかを聞く。おすすめは「push する」。
+4. **commit**: リポジトリに変更が無ければ commit を飛ばして 5 に進む。`git diff` を見せて確認してから、エリアごとに分けて `main` に直接 commit する（個人用の dotfiles なのでブランチや PR は作らない）。メッセージは `[feat]` `[fix]` `[del]` + 日本語（例: `[feat] Brewfile に actionlint などを追加`）。
+5. **push**: push するもの（1 の `ahead` が 1 以上か `unknown`、またはこの実行でした commit）が無ければ、確認を飛ばして終わる。あれば AskUserQuestion で `origin main` に push するかを聞く。おすすめは「push する」。
 
 ## 9. ツールの追加
 
 ユーザーが引数か会話でツールの追加を頼んだときだけ行う。§8 の差分の確認の後に行う。
 
-1. README の「ツールを追加する」の手順で行う: 設定ファイルを `lib/` に置く、`cmd/setup` に冪等な `setup_<tool>` を足して手順の並びに加える、`lib/<tool>.md` を書く、README の表に 1 行足す。
-2. 反映方法をツールごとに提案し、確認する:
+1. 反映方法をツールごとに提案し、確認する:
    - 原則はシンボリックリンク（設定ファイルを `lib/` にコピーし、元のファイルは `cmd/setup` の `link_file` が退避してリンクにする。starship と同じ）。以後のローカルの変更は `lib` の未コミットの変更として §8 で出てくる。
    - Mac ごとの値や秘密情報が混ざるファイルは、ツールの include 機能を使う（例: git は `~/.gitconfig` に `[include] path = .../lib/gitconfig`）。シンボリックリンクにすると、秘密情報を除いた内容でローカルのファイルが置き換わるため。
    - ツールがシンボリックリンクを保つか（書き換えるときにリンクを普通のファイルに置き換えないか）を確かめ、保たないなら別の方式にする。
+2. 1 で決めた方式で、README の「ツールを追加する」の手順で行う: 設定ファイルを `lib/` に置く、`cmd/setup` に冪等な `setup_<tool>` を足して手順の並びに加える、`lib/<tool>.md` を書く、README の表に 1 行足す。
 3. include 方式のように `lib` の変更として出てこないものは、そのツール用の検出を `collect` に足す（§5 の形式で出す）。
 4. 秘密情報（§6 の `secret`）と壊れた内容（`garbage`）は取り込まない。
 5. ユーザーに別のターミナル（Terminal.app）で `<リポジトリ>/cmd/setup` を実行してもらい（Claude Code の `!` では `cmd/setup` の質問に答えられないため）、ローカルのファイルがリンクなどに切り替わったことを Claude が確認してから、§8 の 4、5 で commit と push をする。
