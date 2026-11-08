@@ -1,0 +1,457 @@
+#!/bin/bash
+# この Mac の設定と dotfiles リポジトリの差分を集め、決まった形式で標準出力に出す。
+# /sync-to-dotfiles の skill が読む。読み取り専用で、書き込むのは git fetch だけ。
+# 使い方: collect [--no-fetch]
+# テストでは HOME、PATH（偽の brew）、DOTFILES_IGNORE_FILE（除外リスト）を差し替えられる。
+# shellcheck disable=SC2088 # メッセージ中の ~ は表示用。case のパターンの ~ は文字どおり
+
+# awk と grep をバイト単位で動かす（macOS の awk は UTF-8 のロケールで多バイト文字を扱えない）
+export LC_ALL=C
+# git status と git diff が .git/index を書き換えないようにする
+export GIT_OPTIONAL_LOCKS=0
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." 2>/dev/null && pwd -P)"
+LIB_DIR="$REPO_ROOT/lib"
+IGNORE_FILE="${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}"
+# lib の要約で出す最大の行数と、plist の値を省略する文字数
+MAX_LINES=200
+MAX_VALUE_CHARS=80
+
+NO_FETCH=0
+ITEMS=0
+IGNORED=0
+IGNORE_IDS=()
+LIB_CHANGES=()
+DIRTY=()
+WARNINGS=()
+
+# UTF-8 の文字数を数える awk の関数（LC_ALL=C で、続きのバイト 0x80-0xBF を数えない）
+AWK_UTF8='
+function nchars(s,   t) { t = s; return length(s) - gsub(/[\200-\277]/, "", t) }
+function truncate(s, max,   i, n) {
+  for (i = 1; i <= length(s); i++)
+    if (substr(s, i, 1) !~ /^[\200-\277]$/ && ++n > max) return substr(s, 1, i - 1)
+  return s
+}'
+
+# ~/... $HOME/... ${HOME}/... /Users/... の形のパス（直前は行頭か、パスに使わない文字）
+# shellcheck disable=SC2016 # 正規表現の $HOME は文字どおり
+PATH_REF_RE='(^|[^[:alnum:]_./~$-])(~|\$HOME|\$\{HOME\}|/Users)/[^][:space:]"'\''`;:(){}|&<>*?$,[]*'
+# 秘密情報らしい名前への代入（$ で始まる値は、別の変数やコマンドの結果なので除く）
+SECRET_ASSIGN_RE='(token|secret|passw(or)?d|api[_-]?key)[[:alnum:]_-]*["'\'']?[[:space:]]*[:=][[:space:]]*["'\'']?[^[:space:]"'\''$]'
+# よく知られた形のトークン
+SECRET_VALUE_RE='(^|[^[:alnum:]_-])(ghp_[[:alnum:]]{20,}|gho_[[:alnum:]]{20,}|github_pat_[[:alnum:]_]{20,}|sk-[[:alnum:]_-]{16,}|xox[a-z]-[[:alnum:]-]{10,}|AKIA[0-9A-Z]{16})'
+
+fatal() {
+  printf 'collect: %s\n' "$1" >&2
+  exit 1
+}
+
+add_warning() { WARNINGS+=("$1"); }
+
+repo_git() { git -C "$REPO_ROOT" -c core.quotePath=false "$@"; }
+
+brew_cmd() { HOMEBREW_NO_AUTO_UPDATE=1 brew "$@" 2>/dev/null; }
+
+# 標準入力の各行の先頭に 4 スペースを付ける
+indent() { sed 's/^/    /'; }
+
+# 標準入力を MAX_LINES 行まで出す。超えたら、省略したことを書く
+head_lines() {
+  awk -v max="$MAX_LINES" '
+    NR <= max { print }
+    END { if (NR > max) printf "(全 %d 行のうち、先頭 %d 行だけを表示しています)\n", NR, max }
+  '
+}
+
+# 除外リストを IGNORE_IDS に読み込む。空行と # で始まる行は無視する
+read_ignore_list() {
+  local line
+  [ -f "$IGNORE_FILE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "" | "#"*) ;;
+      *) IGNORE_IDS+=("$line") ;;
+    esac
+  done <"$IGNORE_FILE"
+}
+
+is_ignored() {
+  local id
+  for id in "${IGNORE_IDS[@]}"; do
+    [ "$id" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# emit_item <種類> <識別子> <方向> <フラグ> <本文>
+# 除外リストにある id は出さずに数える
+emit_item() {
+  local id="$1:$2" flags="${4#,}"
+  if is_ignored "$id"; then
+    IGNORED=$((IGNORED + 1))
+    return
+  fi
+  ITEMS=$((ITEMS + 1))
+  printf '=== item\nkind: %s\nid: %s\ndirection: %s\nflags: %s\nbody:\n' "$1" "$id" "$3" "${flags:--}"
+  printf '%s\n' "$5" | indent
+}
+
+# --- フラグ（§6） ---
+
+# $HOME の絶対パスを含むか（/Users/foo に対して /Users/foobar は数えない）
+has_home_path() {
+  local home="${HOME%/}"
+  [ -n "$home" ] || return 1
+  printf '%s\n' "$1" | HOME_DIR="$home" awk '
+    {
+      s = $0
+      while ((i = index(s, ENVIRON["HOME_DIR"])) > 0) {
+        s = substr(s, i + length(ENVIRON["HOME_DIR"]))
+        if (s !~ /^[[:alnum:]_.-]/) { found = 1; exit }
+      }
+    }
+    END { exit !found }
+  '
+}
+
+# 存在しないパスを参照しているか
+has_missing_path() {
+  local ref path
+  while IFS= read -r ref; do
+    # shellcheck disable=SC2016 # パターンの $HOME は文字どおり
+    case "$ref" in
+      "~/"*) path="$HOME/${ref:2}" ;;
+      '$HOME/'*) path="$HOME/${ref:6}" ;;
+      '${HOME}/'*) path="$HOME/${ref:8}" ;;
+      *) path="$ref" ;;
+    esac
+    [ -e "$path" ] || return 0
+  done < <(printf '%s\n' "$1" | grep -oE "$PATH_REF_RE" | sed 's|^[^~$/]||')
+  return 1
+}
+
+has_secret() {
+  printf '%s\n' "$1" | grep -qiE "$SECRET_ASSIGN_RE" || printf '%s\n' "$1" | grep -qE "$SECRET_VALUE_RE"
+}
+
+# 1000 文字以上の行か、100 文字以上の空白だけの行があるか
+has_garbage() {
+  printf '%s\n' "$1" | awk "$AWK_UTF8"'
+    nchars($0) >= 1000 || (/^[[:space:]]+$/ && nchars($0) >= 100) { found = 1; exit }
+    END { exit !found }
+  '
+}
+
+# 段落のコメントでない行が、すべて lib/zshrc にあるか（前後の空白を除いて比べる）
+in_dotfiles() {
+  [ -f "$LIB_DIR/zshrc" ] || return 1
+  printf '%s\n' "$1" | ZSHRC="$LIB_DIR/zshrc" awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    BEGIN { while ((getline line < ENVIRON["ZSHRC"]) > 0) have[trim(line)] = 1 }
+    { line = trim($0) }
+    line ~ /^(#|$)/ { next }
+    !(line in have) { missing = 1 }
+    END { exit missing }
+  '
+}
+
+# content_flags <内容>: 内容だけで決まるフラグをカンマ区切りで出す
+content_flags() {
+  local flags=""
+  has_home_path "$1" && flags="$flags,home-path"
+  has_missing_path "$1" && flags="$flags,missing-path"
+  has_secret "$1" && flags="$flags,secret"
+  has_garbage "$1" && flags="$flags,garbage"
+  printf '%s' "$flags"
+}
+
+# --- repo ---
+
+# git status を、lib/ の変更（LIB_CHANGES。"XY パス" の形）とそれ以外（DIRTY）に分ける
+read_status() {
+  local entry
+  while IFS= read -r -d '' entry; do
+    case "${entry:3}" in
+      lib/*) LIB_CHANGES+=("$entry") ;;
+      *) DIRTY+=("${entry:3}") ;;
+    esac
+  done < <(repo_git status --porcelain -z --no-renames --untracked-files=all)
+}
+
+print_repo() {
+  local branch behind=unknown ahead=unknown counts path
+  if ! branch="$(repo_git symbolic-ref --short -q HEAD)"; then
+    branch=HEAD
+    add_warning "ブランチにいない（detached HEAD）ため、behind と ahead を数えていません"
+  elif [ "$NO_FETCH" -eq 0 ] && ! GIT_TERMINAL_PROMPT=0 repo_git fetch --quiet origin >/dev/null 2>&1; then
+    add_warning "git fetch に失敗したため、behind と ahead を数えていません"
+  elif ! repo_git rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null; then
+    add_warning "origin/$branch が無いため、behind と ahead を数えていません"
+  else
+    counts="$(repo_git rev-list --left-right --count "refs/remotes/origin/$branch...HEAD")"
+    behind="${counts%%[[:space:]]*}"
+    ahead="${counts##*[[:space:]]}"
+  fi
+  printf '=== repo\nbranch: %s\nbehind: %s\nahead: %s\n' "$branch" "$behind" "$ahead"
+  for path in "${DIRTY[@]}"; do
+    printf 'dirty: %s\n' "$path"
+  done
+}
+
+# --- brew / cask / tap ---
+
+# brewfile_names <種類>: lib/Brewfile の brew / cask / tap の名前を順に出す
+brewfile_names() {
+  [ -f "$LIB_DIR/Brewfile" ] || return 0
+  sed -nE "s/^[[:space:]]*$1[[:space:]]+[\"']([^\"']+)[\"'].*/\1/p" "$LIB_DIR/Brewfile"
+}
+
+# only_in <一覧 A> <一覧 B> [base]
+# A にあって B に無いものを A の順に出す。base を付けると、名前の最後の / より後ろで比べる
+# （tap のフォーミュラは、brew leaves では user/tap/name、brew list では name と出る）
+only_in() {
+  awk -v base="${3:+1}" '
+    function key(s) { if (base) sub(/.*\//, "", s); return s }
+    NR == FNR { seen[key($0)] = 1; next }
+    $0 != "" && !(key($0) in seen)
+  ' <(printf '%s\n' "$2") <(printf '%s\n' "$1")
+}
+
+# compare_brew <種類> <ローカルで入れたもの> <インストール済みのもの> [base]
+compare_brew() {
+  local kind="$1" in_brewfile name
+  in_brewfile="$(brewfile_names "$kind")"
+  while IFS= read -r name; do
+    emit_item "$kind" "$name" local "" "$name"
+  done < <(only_in "$2" "$in_brewfile" "$4")
+  while IFS= read -r name; do
+    emit_item "$kind" "$name" dotfiles "" "$name"
+  done < <(only_in "$in_brewfile" "$3" "$4")
+}
+
+collect_brew() {
+  local leaves formulae casks taps
+  if ! command -v brew >/dev/null 2>&1; then
+    add_warning "brew が見つからないため、brew / cask / tap を確認していません"
+    return
+  fi
+  # インストール済みかは、依存として入ったものも含めて判定する
+  if leaves="$(brew_cmd leaves --installed-on-request)" && formulae="$(brew_cmd list --formula)"; then
+    compare_brew brew "$leaves" "$formulae" base
+  else
+    add_warning "brew leaves か brew list --formula に失敗したため、brew を確認していません"
+  fi
+  if casks="$(brew_cmd list --cask)"; then
+    compare_brew cask "$casks" "$casks" base
+  else
+    add_warning "brew list --cask に失敗したため、cask を確認していません"
+  fi
+  if taps="$(brew_cmd tap)"; then
+    compare_brew tap "$taps" "$taps"
+  else
+    add_warning "brew tap に失敗したため、tap を確認していません"
+  fi
+}
+
+# --- zshrc / zprofile ---
+
+# zsh_paragraphs <ファイル> [shellenv]
+# dotfiles ブロックを除き、空行で区切った段落を \034 区切りで出す。ブロックは段落の区切りとして扱う。
+# コメントだけの段落と空の段落は出さない。shellenv を付けると、brew shellenv を含む行も除く。
+zsh_paragraphs() {
+  awk -v drop_shellenv="${2:+1}" '
+    function flush() { if (code) printf "%s\034", para; para = ""; code = 0 }
+    /^# >>> dotfiles/ { in_block = 1 }
+    in_block { if (/^# <<< dotfiles/) in_block = 0; flush(); next }
+    drop_shellenv && /brew shellenv/ { next }
+    $0 == "" { flush(); next }
+    {
+      para = para (para == "" ? "" : "\n") $0
+      if ($0 !~ /^[[:space:]]*(#|$)/) code = 1
+    }
+    END { flush() }
+  ' "$1"
+}
+
+# dotfiles ブロックの終わりの行が無ければ真
+has_unclosed_block() {
+  awk '/^# >>> dotfiles/ { open = 1 } /^# <<< dotfiles/ { open = 0 } END { exit !open }' "$1"
+}
+
+# 段落の最初のコメントでない行（前後の空白を除く）
+first_code_line() {
+  printf '%s\n' "$1" | awk '
+    !/^[[:space:]]*(#|$)/ { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print; exit }
+  '
+}
+
+# collect_zsh <種類> <ファイル> [shellenv]
+collect_zsh() {
+  local kind="$1" file="$2" para flags
+  [ -f "$file" ] || return 0
+  if has_unclosed_block "$file"; then
+    add_warning "~/.$kind の dotfiles ブロックが閉じていないため、ブロックの開始行より後ろを確認していません"
+  fi
+  while IFS= read -r -d $'\034' para; do
+    flags="$(content_flags "$para")"
+    in_dotfiles "$para" && flags="$flags,in-dotfiles"
+    emit_item "$kind" "$(first_code_line "$para")" local "$flags" "$para"
+  done < <(zsh_paragraphs "$file" "$3")
+}
+
+# --- lib ---
+
+# 標準入力の plist を「キーのパス<TAB>値」の行にする。値は 1 行にし、文字列は "" で囲む。
+# キーのパスは dict のキーを / で、array の添字を [n] でつなぐ（例: New Bookmarks[0]/Name）
+plist_lines() {
+  local xml
+  xml="$(plutil -convert xml1 -o - - 2>/dev/null)" || return 1
+  printf '%s\n' "$xml" | awk '
+    BEGIN { RS = "<" }
+    function unescape(s) {
+      gsub(/&lt;/, "<", s); gsub(/&gt;/, ">", s); gsub(/&quot;/, "\"", s); gsub(/&apos;/, "\047", s)
+      gsub(/&amp;/, "\\&", s)
+      return s
+    }
+    # 値が始まったときに、その値のキーのパスを返す
+    function child() {
+      if (depth == 0) return ""
+      count[depth]++
+      if (type[depth] == "array") return path[depth] "[" (count[depth] - 1) "]"
+      return path[depth] == "" ? key : path[depth] "/" key
+    }
+    function emit(p, v) { gsub(/\t/, "\\t", v); gsub(/\n/, "\\n", v); print p "\t" v }
+    {
+      i = index($0, ">")
+      if (i == 0) next
+      tag = substr($0, 1, i - 1)
+      text = substr($0, i + 1)
+      sub(/[[:space:]].*/, "", tag)
+    }
+    tag == "key" { key = unescape(text); next }
+    tag == "dict" || tag == "array" {
+      p = child()
+      depth++
+      type[depth] = tag; path[depth] = p; count[depth] = 0
+      next
+    }
+    # 空の dict と array も値として出す（追加と削除がわかるように）
+    tag == "/dict" || tag == "/array" {
+      if (count[depth] == 0) emit(path[depth], type[depth] == "dict" ? "{}" : "[]")
+      depth--
+      next
+    }
+    tag == "dict/" { emit(child(), "{}"); next }
+    tag == "array/" { emit(child(), "[]"); next }
+    tag == "string" { emit(child(), "\"" unescape(text) "\""); next }
+    tag == "string/" { emit(child(), "\"\""); next }
+    tag == "data" { gsub(/[[:space:]]/, "", text); emit(child(), "data:" text); next }
+    tag == "true/" || tag == "false/" { emit(child(), substr(tag, 1, length(tag) - 1)); next }
+    tag == "integer" || tag == "real" || tag == "date" { gsub(/[[:space:]]/, "", text); emit(child(), text) }
+  '
+}
+
+# plist_summary <パス> [flags]
+# HEAD と作業ツリーの plist を比べ、変わったキーのパスと前後の値を出す（長い値は省略する）。
+# flags を付けると、フラグの判定に使う変更後の値（data を除く）を出す。
+# どちらかを plist として読めなければ偽。
+plist_summary() {
+  local before after
+  [ -f "$REPO_ROOT/$1" ] || return 1
+  before="$(repo_git show "HEAD:$1" 2>/dev/null | plist_lines)" || return 1
+  after="$(plist_lines <"$REPO_ROOT/$1")" || return 1
+  awk -F '\t' -v mode="$2" -v max="$MAX_VALUE_CHARS" "$AWK_UTF8"'
+    function short(v) { return nchars(v) > max ? truncate(v, max) "...(全 " nchars(v) " 文字)" : v }
+    # 値が無いほうは空で渡す
+    function show(p, b, a) {
+      if (mode == "flags") {
+        if (a != "" && a !~ /^data:/) print p ": " a
+        return
+      }
+      print (p == "" ? "(ルート)" : p) ": " (b == "" ? "(なし)" : short(b)) " -> " (a == "" ? "(なし)" : short(a))
+    }
+    FILENAME == ARGV[1] { before[$1] = $2; order[++n] = $1; next }
+    {
+      seen[$1] = 1
+      if (!($1 in before)) show($1, "", $2)
+      else if (before[$1] != $2) show($1, before[$1], $2)
+    }
+    END { for (i = 1; i <= n; i++) if (!(order[i] in seen)) show(order[i], before[order[i]], "") }
+  ' <(printf '%s\n' "$before") <(printf '%s\n' "$after")
+}
+
+# git diff のうち、足された行だけを出す
+added_lines() {
+  awk '/^@@/ { hunk = 1; next } hunk && /^\+/ { print substr($0, 2) }'
+}
+
+# lib_item <"XY パス">: lib/ の変更 1 件を要約して出す。フラグは足された内容で判定する
+lib_item() {
+  local status="${1:0:2}" path="${1:3}" file body flag_text="" diff summary
+  file="$REPO_ROOT/$path"
+  if [ "$status" = "??" ]; then
+    body="(未追跡のファイル)"
+    if [ -L "$file" ]; then
+      body="$body"$'\n'"(シンボリックリンク: $(readlink "$file"))"
+    elif [ ! -s "$file" ]; then
+      body="$body"$'\n'"(空のファイル)"
+    elif ! grep -qI '' "$file"; then
+      body="$body"$'\n'"(バイナリファイル)"
+    else
+      body="$body"$'\n'"$(head_lines <"$file")"
+      flag_text="$(cat "$file")"
+    fi
+  elif [ "${path%.plist}" != "$path" ] && summary="$(plist_summary "$path")"; then
+    if [ -n "$summary" ]; then
+      body="$(printf '%s\n' "$summary" | head_lines)"
+    else
+      body="(キーと値は HEAD と同じです。書式だけが変わっています)"
+    fi
+    flag_text="$(plist_summary "$path" flags)"
+  else
+    # plist 以外と、plist として読めないもの（削除や新規の追加）は git diff で出す
+    diff="$(repo_git diff --no-color --no-ext-diff HEAD -- "$path")"
+    body="$(printf '%s\n' "$diff" | head_lines)"
+    flag_text="$(printf '%s\n' "$diff" | added_lines)"
+    [ -n "$diff" ] || body="(HEAD との差分はありません)"
+  fi
+  emit_item lib "$path" changed "$(content_flags "$flag_text")" "$body"
+}
+
+collect_lib() {
+  local entry
+  for entry in "${LIB_CHANGES[@]}"; do
+    lib_item "$entry"
+  done
+}
+
+print_footer() {
+  if [ "${#WARNINGS[@]}" -gt 0 ]; then
+    echo "=== warn"
+    printf '%s\n' "${WARNINGS[@]}"
+  fi
+  printf '=== summary\nitems: %d\nignored: %d\n' "$ITEMS" "$IGNORED"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-fetch) NO_FETCH=1 ;;
+    *) fatal "不明な引数です: $arg（使い方: collect [--no-fetch]）" ;;
+  esac
+done
+
+command -v git >/dev/null 2>&1 || fatal "git が見つかりません"
+if [ -z "$REPO_ROOT" ] || [ ! -d "$LIB_DIR" ] ||
+  [ "$(repo_git rev-parse --show-toplevel 2>/dev/null)" != "$REPO_ROOT" ]; then
+  fatal "dotfiles リポジトリが見つかりません（collect は .claude/skills/sync-to-dotfiles/scripts/ に置きます）"
+fi
+
+read_ignore_list
+read_status
+print_repo
+collect_brew
+collect_zsh zshrc "$HOME/.zshrc"
+collect_zsh zprofile "$HOME/.zprofile" shellenv
+collect_lib
+print_footer
