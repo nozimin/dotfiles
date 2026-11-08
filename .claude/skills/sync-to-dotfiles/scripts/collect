@@ -258,6 +258,7 @@ collect_brew() {
 
 # zsh_paragraphs <ファイル> [shellenv]
 # dotfiles ブロックを除き、空行で区切った段落を \034 区切りで出す。ブロックは段落の区切りとして扱う。
+# 空行には 100 文字未満の空白だけの行も含める（100 文字以上のものは garbage として段落に残す）。
 # コメントだけの段落と空の段落は出さない。shellenv を付けると、brew shellenv を含む行も除く。
 zsh_paragraphs() {
   awk -v drop_shellenv="${2:+1}" '
@@ -265,7 +266,8 @@ zsh_paragraphs() {
     /^# >>> dotfiles/ { in_block = 1 }
     in_block { if (/^# <<< dotfiles/) in_block = 0; flush(); next }
     drop_shellenv && /brew shellenv/ { next }
-    $0 == "" { flush(); next }
+    # 空白は 1 バイトの文字なので、length で文字数を数えられる
+    /^[[:space:]]*$/ && length($0) < 100 { flush(); next }
     {
       para = para (para == "" ? "" : "\n") $0
       if ($0 !~ /^[[:space:]]*(#|$)/) code = 1
