@@ -101,16 +101,22 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 |---|---|---|
 | `brew-formula` | brew（ローカル情報のみ。`HOMEBREW_NO_AUTO_UPDATE=1`） | revision（`_1` など）も保持する |
 | `brew-cask` | brew | **.app を持たない cask だけ**（例: `claude-code`）。.app を持つ cask は `app` 側で扱う。フォントは除外 |
-| `app` | `/Applications/*.app` の Info.plist（`CFBundleShortVersionString`、なければ `CFBundleVersion`） | brew の記録したバージョンは使わない。`origin` は `appstore`（`Contents/_MASReceipt` あり）/ `brew-cask` / `sparkle`（`SUFeedURL` あり）/ `other` |
+| `app` | `/Applications/*.app` の Info.plist の `CFBundleShortVersionString` のみ（`CFBundleVersion` はビルド番号のことが多いので使わない） | brew の記録したバージョンは使わない。`origin` は `appstore`（`Contents/_MASReceipt` あり）/ `brew-cask` / `sparkle`（`SUFeedURL` あり）/ `other`。Safari は `macos` 側で扱う |
 | `npm` / `pnpm` | `npm ls -g --json --depth=0` / `pnpm ls -g --json` | ecosystem は npm |
 | `uv` | `uv tool list` | ecosystem は PyPI |
-| `gem` | rbenv の各 Ruby で `gem list` | ecosystem は RubyGems |
-| `macos` | `sw_vers` | Safari は macOS に含めて扱う |
+| `gem` | rbenv の各 Ruby で `gem list` | ecosystem は RubyGems。インストール済みの版ごとに 1 項目（OSV の照合に正確な版が要る） |
+| `macos` | `sw_vers`、Safari の Info.plist | macOS 本体と Safari（`name: "Safari"`）の 2 項目 |
 | `ruby` | `rbenv versions --bare` | Ruby 本体 |
 | `vscode` | `code --list-extensions --show-versions` | |
 
-- ツールが入っていない kind（例: `pnpm` が無い）は `warn` ではなく `ok` + `count: 0` + `notes` に「未インストール」と書く。ツールはあるのに一覧の取得に失敗した、または 0 件だった場合は `warn` / `error`。
-- バージョンを読めない項目（例: Steam）は項目を残し `version: null` にし、そのエンベロープを `warn` にして `notes` に名前を書く。
+- ツールが入っていない kind（例: `pnpm` が無い）は `warn` ではなく `ok` + `count: 0` + `notes` に「未インストール」と書く。
+- 0 件の扱い:
+  - `npm` / `pnpm` / `uv` / `vscode` / `brew-cask` / `ruby` は、0 件が正常であり得る。ツールの出力を正常に解析でき、その出力自体が 0 件を示している（例: `uv tool list` の `No tools installed`、`pnpm ls -g --json` が依存なしの正しい JSON）ときは `ok` にし、`evidence` にその根拠（出力の要点）を書く。
+  - `brew-formula` / `app` / `macos` / `gem` は 0 件なら `warn`（この Mac で 0 件はあり得ず、取得の失敗を疑う）。
+  - どの kind でも、コマンドの失敗や解析の失敗は `error`。
+- バージョンを読めない項目（例: Steam）は項目を残し `version: null` にし、そのエンベロープを `warn` にして `notes` に名前を書く（参考になる値があれば添える。例: Steam の `CFBundleVersion`）。
+- `origin` の値: `brew-formula` / `brew-cask` は tap、`gem` は `rbenv <版>`、`ruby` は `rbenv`、`app` は上表、それ以外は `null`。
+- インベントリのエンベロープの `source` は kind 名。層2の `vscode` と同名になるので、エンベロープは `layer` と `source` の組で区別する。
 
 ## 5. 層2（全件照合）
 
@@ -153,8 +159,9 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 
 ## 7. バージョン比較（`compare`）
 
-- 先頭の数字部分で比べる（例: `5.10.2 GM (b5299, …)` は `5.10.2`）。brew の revision（`_1`）は最後の要素として扱う。
-- 比較は `sort -V` を使う。プレリリース（`-beta` など）の厳密な順序は扱わない。
+- 先頭の数字部分で比べる（例: `5.10.2 GM (b5299, …)` は `5.10.2`）。先頭の `v` は無視する。数字に挟まれた `-` と `_` は区切りとして扱う（brew の revision `77.1_1`、日付の `2026-10-20`）。各要素の先頭の 0 と末尾の `.0` は無視する（`1.0 eq 1.0.0`）。
+- 比較は `sort -V` を使う。
+- **プレリリース**: 数字部分の直後に `-` と英字が続くもの（`1.2.3-beta`、`2.0.0-rc.1`）はプレリリースとする。数字部分が等しく片方だけがプレリリースなら、プレリリースの側を小さいとする（`1.2.3-beta lt 1.2.3`）。両方がプレリリースで接尾辞が異なるときは比較不能（終了コード 2）。プレリリースを無視して `eq` にすると、修正前のプレリリース版を「修正済み」と誤判定するため。
 - 数字として解釈できない場合は終了コード 2 で失敗する（呼び出し側は「比較不能」として扱い、要確認にする）。
 
 ## 8. skill の手順（SKILL.md）
@@ -265,7 +272,7 @@ P1 [継続] Postman 11.44.0 → 12.34.0
 1. shellcheck: `scripts/vulncheck` と `tests/run` が警告なしで通る。
 2. 故障注入: 各外部ソースについて、存在しない URL に向けると `status: "error"`、空のファイル（`file://`）に向けると `status: "warn"` になる。
 3. 既知の陽性: インベントリを差し替え、npm の `lodash@4.17.15` を入れると `osv` が脆弱性を返す。
-4. `compare`: `1.9.5 lt 1.10.0`、`156.0.8078.9 lt 156.0.8078.81`、`77.1 lt 77.1_1`、`5.10.2 GM (b5299, 5a516b44) eq 5.10.2`、数字でない入力は終了コード 2。
+4. `compare`: `1.9.5 lt 1.10.0`、`156.0.8078.9 lt 156.0.8078.81`、`77.1 lt 77.1_1`、`5.10.2 GM (b5299, 5a516b44) eq 5.10.2`、`1.2.3-beta lt 1.2.3`、`1.2.3-alpha` と `1.2.3-beta` は終了コード 2、数字でない入力は終了コード 2。
 5. RSS の取得範囲: `VULNCHECK_NOW` と、範囲が 30 日に満たない RSS のフィクスチャで `warn` になる。
 
 `tests/run` は全項目の結果を表示し、1 つでも失敗すれば終了コード 1。ネットワークが必要な試験（3）はそう明記する。
