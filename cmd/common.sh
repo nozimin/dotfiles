@@ -2,7 +2,7 @@
 # shellcheck shell=bash
 
 # shellcheck disable=SC2034 # source 先で使う
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck disable=SC2034
 LIB_DIR="$REPO_ROOT/lib"
 # shellcheck disable=SC2034
@@ -71,17 +71,26 @@ is_linked() {
 }
 
 # link_file <リンク元> <リンク先>
-# リンク先に別のファイルがあれば、確認してから退避してリンクを作る。
+# 確認してからリンクを作る。別の場所へのリンクは張り替え、ファイルは退避する。
 link_file() {
-  local src="$1" dest="$2" backup
+  local src="$1" dest="$2" backup="" question
   if is_linked "$src" "$dest"; then
     return 0
   fi
-  if [ -e "$dest" ] || [ -L "$dest" ]; then
+  if [ -L "$dest" ]; then
+    question="$(pretty_path "$dest") は $(pretty_path "$(readlink "$dest")") へのリンクです。$(pretty_path "$src") へのリンクに張り替えますか？"
+  elif [ -e "$dest" ]; then
     backup="$dest.backup-$(date +%Y%m%d%H%M%S)"
-    ask_yes_no "$(pretty_path "$dest") が既にあります。$(pretty_path "$backup") に退避してリンクを作りますか？" || return 1
+    question="$(pretty_path "$dest") が既にあります。$(pretty_path "$backup") に退避して $(pretty_path "$src") へのリンクにしますか？"
+  else
+    question="$(pretty_path "$dest") を $(pretty_path "$src") へのリンクにしますか？"
+  fi
+  ask_yes_no "$question" || return 1
+  if [ -n "$backup" ]; then
     mv "$dest" "$backup" || return 1
     ok "$(pretty_path "$backup") に退避しました"
+  elif [ -L "$dest" ]; then
+    rm "$dest" || return 1
   fi
   mkdir -p "$(dirname "$dest")" && ln -s "$src" "$dest" || return 1
   ok "$(pretty_path "$dest") -> $(pretty_path "$src")"
@@ -102,6 +111,31 @@ append_block() {
   ask_yes_no "追記しますか？" || return 1
   printf '\n%s\n' "$block" >>"$file" || return 1
   ok "$(pretty_path "$file") に追記しました"
+}
+
+# replace_block <ファイル> <名前> <内容>
+# マーカー付きのブロックの中身を、差分を表示して確認してから書き換える。
+replace_block() {
+  local file="$1" name="$2" body="$3" begin end tmp
+  begin="# >>> $name >>>"
+  end="# <<< $name <<<"
+  echo "$(pretty_path "$file") の $name ブロックを書き換えます:"
+  awk -v begin="$begin" -v end="$end" '$0 == end { f = 0 } f { print } $0 == begin { f = 1 }' "$file" | sed 's/^/    - /'
+  printf '%s\n' "$body" | sed 's/^/    + /'
+  ask_yes_no "書き換えますか？" || return 1
+  tmp="$(mktemp)" || return 1
+  if BODY="$body" awk -v begin="$begin" -v end="$end" '
+    $0 == begin { print; print ENVIRON["BODY"]; f = 1; found = 1; next }
+    $0 == end { f = 0 }
+    !f { print }
+    END { exit !found }
+  ' "$file" >"$tmp" && cat "$tmp" >"$file"; then
+    rm -f "$tmp"
+    ok "$(pretty_path "$file") を書き換えました"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # Homebrew のインストール先（Apple Silicon: /opt/homebrew, Intel: /usr/local）

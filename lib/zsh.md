@@ -28,4 +28,4 @@ printf '\n# >>> config_for_mac >>>\nsource "%s/lib/zshrc"\n# <<< config_for_mac 
 
 ## リポジトリを移動したとき
 
-`~/.zshrc` の `config_for_mac` ブロックのパスを書き換える。setup はパスがずれていると失敗として表示する。
+移動先の `cmd/setup` を実行すると、`config_for_mac` ブロックが古いパスを指していれば、差分を表示して書き換えるかを確認される。ブロックの外は変更しない。

@@ -46,15 +46,14 @@ setup_brew_bundle() {
 # ~/.zshrc から lib/zshrc を読み込む
 setup_zsh() {
   local zshrc="$HOME/.zshrc" line="source \"$LIB_DIR/zshrc\""
-  if has_block "$zshrc" "$MARKER"; then
-    if grep -qF "$line" "$zshrc"; then
-      ok "~/.zshrc から lib/zshrc を読み込み済み"
-    else
-      fail "zsh" "~/.zshrc の $MARKER ブロックが別の場所を指しています。$line に直してください"
-    fi
-    return
+  if ! has_block "$zshrc" "$MARKER"; then
+    append_block "$zshrc" "$MARKER" "$line" || skip "zsh"
+  elif grep -qF "$line" "$zshrc"; then
+    ok "~/.zshrc から lib/zshrc を読み込み済み"
+  else
+    # リポジトリを移動したときは、ブロックが古い場所を指している
+    replace_block "$zshrc" "$MARKER" "$line" || skip "zsh"
   fi
-  append_block "$zshrc" "$MARKER" "$line" || skip "zsh"
 }
 
 # ~/.config/starship.toml -> lib/starship.toml
@@ -64,10 +63,6 @@ setup_starship() {
     ok "starship の設定はリンク済み"
     return
   fi
-  ask_yes_no "starship の設定 ($(pretty_path "$dest")) を lib/starship.toml へのリンクにしますか？" || {
-    skip "starship"
-    return
-  }
   link_file "$src" "$dest" || skip "starship"
 }
 

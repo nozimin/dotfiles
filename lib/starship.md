@@ -6,6 +6,7 @@
 
 - `~/.config/starship.toml` を `lib/starship.toml` へのシンボリックリンクにする。
 - すでに別のファイルがあれば、確認してから `starship.toml.backup-<日時>` に退避する。
+- 別の場所へのリンク（リポジトリを移動した場合など）なら、確認してから張り替える。
 
 starship の初期化は `lib/zshrc` に書いてある（[zsh.md](zsh.md)）。
 

@@ -7,8 +7,8 @@ Mac の開発環境の設定ファイルと、それをセットアップする�
 新しい Mac で次を実行し、表示される質問に答える（Enter のみは Yes）。
 
 ```sh
-git clone https://github.com/nozimin/config_for_mac.git ~/Repository/config_for_mac
-~/Repository/config_for_mac/cmd/setup
+git clone https://github.com/nozimin/config_for_mac.git ~/WorkSpace/Repositories/config_for_mac
+~/WorkSpace/Repositories/config_for_mac/cmd/setup
 ```
 
 - `git clone` の初回は Xcode Command Line Tools のインストールダイアログが出るので、インストールしてからやり直す。
@@ -29,6 +29,12 @@ git clone https://github.com/nozimin/config_for_mac.git ~/Repository/config_for_
 | git | `user.name` と `user.email` が未設定なら入力してもらう | [lib/git.md](lib/git.md) |
 
 `~/.zshrc` などへの追記や、既存ファイルの退避は、内容を表示して確認してから行う。最後にスキップしたものと失敗したものを表示する。失敗があれば終了コードは 1。
+
+## リポジトリを移動したとき
+
+`~/.zshrc` の source 行、`~/.config/starship.toml` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。
+
+iTerm2 の手順は iTerm2 を終了しないと実行できないので、Terminal.app から実行する。
 
 ## 構成
 
