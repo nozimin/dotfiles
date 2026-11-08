@@ -72,6 +72,7 @@ Claude Code で `/vuln-check` と打つ。手動実行専用で、Claude が自�
 - formulae.brew.sh: formula 名（formula ごとに問い合わせるので URL に入る。cask は一覧全体を 1 回取得するだけ）
 - iTunes Lookup（`itunes.apple.com`）: App Store のアプリの bundle id
 - WebSearch / WebFetch: Claude がリリースノートなどを調べるときの、アプリ名とバージョン
+- Claude（Anthropic）: インベントリとスクリプトの出力（Claude との会話の内容として送られる）
 
 endoflife.date、CISA KEV、JVN、JPCERT/CC、VS Code の削除済み一覧（GitHub）からは、公開データを取得するだけ。
 
