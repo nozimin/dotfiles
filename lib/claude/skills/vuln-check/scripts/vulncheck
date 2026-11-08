@@ -220,12 +220,15 @@ parse_inventory_option() {
     die "--inventory のファイルが inventory の出力の形ではありません: $INVENTORY_FILE"
 }
 
-# version_key <バージョン>
-# 比較に使う先頭の数字部分を . 区切りで出す（§7）。例: 5.10.2 GM (b5299) → 5.10.2、77.1_1 → 77.1.1、2026-10-20 → 2026.10.20
-# 各要素の先頭の 0 と末尾の .0 は落とす（1.0 と 1.0.0 を等しくする）。数字で始まらなければ 1 を返す。
-version_key() {
-  local re='^[[:space:]]*[vV]?([0-9]+([._-][0-9]+)*)' part key=""
+# version_parts <バージョン>
+# 比較に使う「数字部分 プレリリースの接尾辞」を 1 行で出す（§7）。接尾辞が無ければ数字部分と空白だけ。
+# 数字部分は . 区切りにし、各要素の先頭の 0 と末尾の .0 は落とす（1.0 と 1.0.0 を等しくする）。
+# 例: 5.10.2 GM (b5299) → 5.10.2、77.1_1 → 77.1.1、2026-10-20 → 2026.10.20、2.0.0-rc.1 → 2 -rc.1
+# 数字で始まらなければ 1 を返す。
+version_parts() {
+  local re='^[[:space:]]*[vV]?([0-9]+([._-][0-9]+)*)(-[A-Za-z][^[:space:]]*)?' part key="" pre
   [[ $1 =~ $re ]] || return 1
+  pre="${BASH_REMATCH[3]:-}"
   for part in ${BASH_REMATCH[1]//[._-]/ }; do
     part="${part#"${part%%[!0]*}"}"
     key="$key.${part:-0}"
@@ -234,44 +237,55 @@ version_key() {
   while [[ $key == *.0 ]]; do
     key="${key%.0}"
   done
-  printf '%s\n' "$key"
+  printf '%s %s\n' "$key" "$pre"
 }
 
 # version_compare <A> <B>
-# A<B なら lt、等しければ eq、A>B なら gt を出す。数字として解釈できなければメッセージを出して 2 を返す。
+# A<B なら lt、等しければ eq、A>B なら gt を出す。数字部分が等しければプレリリースの側を小さいとする。
+# 数字として解釈できないときと、接尾辞の異なるプレリリースどうし（1.2.3-alpha と 1.2.3-beta）はメッセージを出して 2 を返す。
 version_compare() {
-  local a b sorted
-  a="$(version_key "$1")" || {
+  local a b a_pre b_pre sorted
+  a="$(version_parts "$1")" || {
     printf 'vulncheck: 数字として解釈できないバージョンです: %s\n' "$1" >&2
     return 2
   }
-  b="$(version_key "$2")" || {
+  b="$(version_parts "$2")" || {
     printf 'vulncheck: 数字として解釈できないバージョンです: %s\n' "$2" >&2
     return 2
   }
-  if [ "$a" = "$b" ]; then
+  a_pre="${a#* }" a="${a%% *}"
+  b_pre="${b#* }" b="${b%% *}"
+  if [ "$a" != "$b" ]; then
+    sorted="$(printf '%s\n%s\n' "$a" "$b" | sort -V)"
+    if [ "${sorted%%$'\n'*}" = "$a" ]; then
+      echo lt
+    else
+      echo gt
+    fi
+  elif [ "$a_pre" = "$b_pre" ]; then
     echo eq
-    return 0
-  fi
-  sorted="$(printf '%s\n%s\n' "$a" "$b" | sort -V)"
-  if [ "${sorted%%$'\n'*}" = "$a" ]; then
+  elif [ -z "$a_pre" ]; then
+    echo gt
+  elif [ -z "$b_pre" ]; then
     echo lt
   else
-    echo gt
+    printf 'vulncheck: プレリリースどうしの順序は比べられません: %s と %s\n' "$1" "$2" >&2
+    return 2
   fi
 }
 
 # --- inventory（§4） ---
 
 # inventory_result <kind> <ok|warn> <evidence の JSON> [補足...]
-# 標準入力の項目（JSON 配列）から inventory のエンベロープを出す。0 件やバージョン不明の項目があれば warn にする。
+# 標準入力の項目（JSON 配列）から inventory のエンベロープを出す。バージョン不明の項目があれば warn にする。
+# 0 件は warn。ただし evidence に empty_reason（0 件を示すツールの出力の要点）があれば ok のまま（§4）。
 inventory_result() {
   local kind="$1" status="$2" evidence="$3" items count unknown
   shift 3
   items="$(cat)"
   count="$(jq -e 'if type == "array" then length else error("項目が JSON 配列ではありません") end' <<<"$items")"
   unknown="$(jq -r '[.[] | select(.version == null) | .name] | join(", ")' <<<"$items")"
-  if [ "$count" -eq 0 ]; then
+  if [ "$count" -eq 0 ] && ! jq -e 'has("empty_reason")' <<<"$evidence" >/dev/null; then
     status=warn
     set -- "$@" "0 件でした"
   fi
@@ -286,6 +300,13 @@ inventory_result() {
 # ツールが入っていない kind は ok + 0 件にする
 inventory_missing() {
   echo '[]' | envelope "$1" inventory ok 0 "$(jq -nc --arg command "$2" '{command: $command}')" "未インストール（$2 が見つかりません）"
+}
+
+# with_empty_reason <evidence の JSON> <0 件を示す出力の要点>
+# 0 件が正常であり得る kind（npm / pnpm / uv / vscode / brew-cask / ruby）で、ツールの出力が 0 件を示しているときに
+# evidence に empty_reason を足す（inventory_result はこれがあれば 0 件でも ok にする）
+with_empty_reason() {
+  jq -c --arg reason "$2" '. + {empty_reason: $reason}' <<<"$1"
 }
 
 # brew が記録したインストール済みの formula と cask を $BREW_JSON に保存する（ローカル情報のみ。1 回の実行で 1 度だけ）
@@ -336,6 +357,9 @@ inventory_brew_cask() {
     | select([.artifacts[]? | objects | keys[]] | index("app") or index("font") | not)
     | {kind: "brew-cask", name: .token, version: .installed, origin: .tap, bundle_id: null,
        path: (if .installed then "\($caskroom)/\(.token)/\(.installed)" else null end)}]' "$BREW_JSON")"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" ".app もフォントも持たない cask が無い")"
+  fi
   inventory_result brew-cask ok "$evidence" <<<"$items"
 }
 
@@ -390,7 +414,7 @@ inventory_app() {
 }
 
 inventory_npm() {
-  local out="$WORK_DIR/npm.json" rc=0 status=ok items
+  local out="$WORK_DIR/npm.json" rc=0 status=ok items evidence='{"command":"npm ls -g --json --depth=0"}'
   if ! has_command npm; then
     inventory_missing npm npm
     return 0
@@ -403,37 +427,45 @@ inventory_npm() {
   fi
   items="$(jq -c '[.dependencies // {} | to_entries[]
     | {kind: "npm", name: .key, version: (.value.version // null), origin: null, bundle_id: null, path: null}]' "$out")"
-  inventory_result npm "$status" '{"command":"npm ls -g --json --depth=0"}' "$@" <<<"$items"
+  if [ "$items" = "[]" ] && [ "$rc" -eq 0 ]; then
+    evidence="$(with_empty_reason "$evidence" "dependencies が空")"
+  fi
+  inventory_result npm "$status" "$evidence" "$@" <<<"$items"
 }
 
 inventory_pnpm() {
-  local items
+  local out="$WORK_DIR/pnpm.json" items evidence='{"command":"pnpm ls -g --json"}'
   if ! has_command pnpm; then
     inventory_missing pnpm pnpm
     return 0
   fi
-  items="$(pnpm ls -g --json </dev/null |
-    jq -c '[.[] | (.dependencies // {}) + (.optionalDependencies // {}) + (.devDependencies // {}) | to_entries[]
-      | {kind: "pnpm", name: .key, version: (.value.version // null), origin: null, bundle_id: null, path: null}]')"
-  inventory_result pnpm ok '{"command":"pnpm ls -g --json"}' <<<"$items"
+  pnpm ls -g --json </dev/null >"$out"
+  items="$(jq -c '[.[] | (.dependencies // {}) + (.optionalDependencies // {}) + (.devDependencies // {}) | to_entries[]
+    | {kind: "pnpm", name: .key, version: (.value.version // null), origin: null, bundle_id: null, path: null}]' "$out")"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" "依存が無い: $(jq -c . "$out" | cut -c 1-200)")"
+  fi
+  inventory_result pnpm ok "$evidence" <<<"$items"
 }
 
 inventory_uv() {
-  local out="$WORK_DIR/uv.txt" err="$WORK_DIR/uv.err" items
+  local out="$WORK_DIR/uv.txt" err="$WORK_DIR/uv.err" items evidence='{"command":"uv tool list"}'
   if ! has_command uv; then
     inventory_missing uv uv
     return 0
   fi
   uv tool list </dev/null >"$out" 2>"$err" || die "uv tool list が失敗しました: $(cat "$err")"
-  # 0 件のときは標準エラーに No tools installed と出る
-  if [ -s "$err" ]; then
-    set -- "uv tool list: $(head -n 1 "$err")"
-  fi
   # 「名前 v バージョン」の行を読み、続く「- 実行ファイル」の行は読み飛ばす
   items="$(jq -R -n -c '[inputs | select(length > 0 and (startswith("-") | not))
     | (capture("^(?<name>[^ ]+) v(?<version>[^ ]+)") // {name: ., version: null})
     | {kind: "uv", name, version, origin: null, bundle_id: null, path: null}]' "$out")"
-  inventory_result uv ok '{"command":"uv tool list"}' "$@" <<<"$items"
+  # 0 件のときは標準エラーに No tools installed と出る。出ないのに 0 件なら warn のまま
+  if [ "$items" = "[]" ] && grep -q 'No tools installed' "$err"; then
+    evidence="$(with_empty_reason "$evidence" "No tools installed")"
+  elif [ -s "$err" ]; then
+    set -- "uv tool list: $(head -n 1 "$err")"
+  fi
+  inventory_result uv ok "$evidence" "$@" <<<"$items"
 }
 
 # rbenv の各 Ruby で gem list。インストールされている版ごとに 1 項目、origin は Ruby のバージョン
@@ -482,7 +514,7 @@ inventory_macos() {
 
 # rbenv の Ruby 本体。jruby-9.4.0.0 のような名前は名前とバージョンに分ける
 inventory_ruby() {
-  local root items
+  local root items evidence='{"command":"rbenv versions --bare"}'
   if ! has_command rbenv; then
     inventory_missing ruby rbenv
     return 0
@@ -492,12 +524,15 @@ inventory_ruby() {
     jq -R -n -c --arg root "$root" '[inputs | select(length > 0)
       | (capture("^(?<name>[a-z][a-z-]*?)-(?<version>[0-9].*)$") // {name: "ruby", version: .}) + {dir: .}
       | {kind: "ruby", name, version, origin: "rbenv", bundle_id: null, path: "\($root)/versions/\(.dir)"}]')"
-  inventory_result ruby ok '{"command":"rbenv versions --bare"}' <<<"$items"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" "出力が空（終了コード 0）")"
+  fi
+  inventory_result ruby ok "$evidence" <<<"$items"
 }
 
 # PATH に code が無ければ .app の中のものを使う
 inventory_vscode() {
-  local code items
+  local code items evidence
   if has_command code; then
     code="$(command -v code)"
   elif [ -x "$VSCODE_APP_CLI" ]; then
@@ -510,7 +545,11 @@ inventory_vscode() {
     jq -R -n -c '[inputs | select(length > 0)
       | (capture("^(?<name>[^@ ]+)@(?<version>[^ ]+)$") // {name: ., version: null})
       | {kind: "vscode", name, version, origin: null, bundle_id: null, path: null}]')"
-  inventory_result vscode ok "$(jq -nc --arg command "$code --list-extensions --show-versions" '{command: $command}')" <<<"$items"
+  evidence="$(jq -nc --arg command "$code --list-extensions --show-versions" '{command: $command}')"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" "出力が空（終了コード 0）")"
+  fi
+  inventory_result vscode ok "$evidence" <<<"$items"
 }
 
 cmd_inventory() {
