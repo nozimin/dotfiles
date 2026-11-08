@@ -27,7 +27,7 @@ git clone https://github.com/nozimin/dotfiles.git ~/WorkSpace/Repositories/dotfi
 | iTerm2 | iTerm2 が `lib/com.googlecode.iterm2.plist` を読み込み、変更を自動で保存するようにする | [lib/iterm2.md](lib/iterm2.md) |
 | GitHub (gh) | `gh auth login` でログインし、`gh auth setup-git` で git の認証に gh を使う | [lib/git.md](lib/git.md) |
 | git | `user.name` と `user.email` が未設定なら入力してもらう | [lib/git.md](lib/git.md) |
-| Claude skills | `lib/claude/skills/` の skill ごとに、`~/.claude/skills/<名前>` をシンボリックリンクにする | [lib/claude.md](lib/claude.md) |
+| Claude skills | `lib/claude/skills/` の skill ごとに、`~/.claude/skills/<名前>` をシンボリックリンクにする | [lib/claude-code.md](lib/claude-code.md) |
 
 `~/.zshrc` などへの追記や、既存ファイルの退避は、内容を表示して確認してから行う。最後にスキップしたものと失敗したものを表示する。失敗があれば終了コードは 1。
 

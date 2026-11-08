@@ -68,11 +68,12 @@ Claude Code で `/vuln-check` と打つ。手動実行専用で、Claude が自�
 
 ### 外部に送る情報
 
-- OSV.dev（`api.osv.dev`）に、npm / pnpm / uv / gem のパッケージ名とバージョンを送る。
-- formulae.brew.sh には formula ごとに問い合わせるので、URL に formula 名が入る。cask は一覧全体を 1 回取得する。
-- iTunes Lookup（`itunes.apple.com`）に、App Store のアプリの bundle id を送る。
-- endoflife.date、CISA KEV、JVN、JPCERT/CC、VS Code の削除済み一覧（GitHub）は、公開データを取得するだけ。
-- Claude がリリースノートなどを調べるときは、アプリ名やバージョンが Web 検索や取得する URL に入る。インベントリの内容は Claude との会話に含まれる。
+- OSV.dev（`api.osv.dev`）: 言語パッケージ（npm / pnpm / uv / gem）の名前とバージョン
+- formulae.brew.sh: formula 名（formula ごとに問い合わせるので URL に入る。cask は一覧全体を 1 回取得するだけ）
+- iTunes Lookup（`itunes.apple.com`）: App Store のアプリの bundle id
+- WebSearch / WebFetch: Claude がリリースノートなどを調べるときの、アプリ名とバージョン
+
+endoflife.date、CISA KEV、JVN、JPCERT/CC、VS Code の削除済み一覧（GitHub）からは、公開データを取得するだけ。
 
 ### スクリプトを直接使う
 
