@@ -18,7 +18,8 @@ lib/claude/skills/vuln-check/
   scripts/vulncheck     決定的な処理（収集・照合・バージョン比較）。bash
   tests/run             試験（§10）
 docs/specs/vuln-check.md  この文書
-lib/claude.md             skill のリンクと /vuln-check の使い方
+lib/claude-code.md        skill のリンクと /vuln-check の使い方
+                          （lib/claude.md にしない。大文字小文字を区別しない FS では lib/CLAUDE.md として自動で読み込まれる）
 ```
 
 - `cmd/setup` の `setup_claude_skills` が `lib/claude/skills/*/` を skill ごとに `~/.claude/skills/<名前>` へシンボリックリンクする（§11）。
@@ -250,9 +251,13 @@ P1 [継続] Postman 11.44.0 → 12.34.0
 
 - `cmd/setup` に `setup_claude_skills` を追加する。
   - `lib/claude/skills/*/` を順に処理し、`~/.claude/skills/<名前>` をそのディレクトリへのシンボリックリンクにする（ディレクトリ全体はリンクしない。既存の他の skill を壊さない）。
-  - 既存の `cmd/common.sh` の関数（`link_file` など）と、README の「ツールを追加する」の約束事に従う: 済んでいれば `ok` を出して何もしない。同じ名前の実体があれば内容を見せて確認してから退避する。古い場所を指すリンクは確認してから張り直す。
+  - 既存の `cmd/common.sh` の関数（`link_file` など）と、README の「ツールを追加する」の約束事に従う: 済んでいれば `ok` を出して何もしない。同じ名前の実体があれば内容を見せて確認してから `~/.claude/skills-backup/<名前>.backup-<日時>` に退避する（`~/.claude/skills` の中に退避すると、退避したものも skill として読み込まれる）。古い場所を指すリンクは確認してから張り直す。
 - README: セットアップ手順の表に「Claude skills」の行を足し、構成の節に `lib/claude/` と `docs/specs/` を足す。
-- `lib/claude.md`: skill のリンクの仕組み、`/vuln-check` の使い方、対象と対象外、レポートの保存先、外部に送る情報（OSV.dev にパッケージ名とバージョンを送る）。
+- `lib/claude-code.md`: skill のリンクの仕組み、`/vuln-check` の使い方、対象と対象外、レポートの保存先、外部に送る情報:
+  - OSV.dev: 言語パッケージの名前とバージョン
+  - formulae.brew.sh: formula 名（URL に入る）
+  - iTunes Lookup: App Store のアプリの bundle id
+  - WebSearch / WebFetch: AI がリリースノートなどを調べるときの、アプリ名とバージョン
 
 ## 12. 試験（`tests/run`）
 
