@@ -11,6 +11,8 @@
 #   取得に失敗したら error、空なら warn のエンベロープを出して 1 を返す。呼び出し側は `|| return 0` で抜ける。
 #   URL は下の *_URL を使う（VULNCHECK_*_URL で差し替え、file:// も可）。エンベロープを作らない取得は fetch。
 #   多数の URL を並列に取るときは fetch_many（1 件ごとの結果を出す）。
+# - 層1の RSS は rss_items で取得して xmllint で項目を読み、RSS_WINDOW_JQ の rss_window で直近 30 日と取得範囲を見る。
+#   インベントリとの緩い名前一致は MATCH_JQ の token_index と candidate。
 # - run_source <ソース> <層> <関数> [引数...]
 #   関数をサブシェルで実行し、途中で失敗したら error のエンベロープにする。ソースごとに囲み、他のソースを止めない。
 # - inventory_items [kind...] でインベントリの項目を JSON 配列で得る（--inventory が無ければその場で集める）。
@@ -589,12 +591,12 @@ fetch_many() {
     "$report" "$list"
 }
 
-# inventory_notes <kind...>
-# 指定した kind のインベントリが取得失敗か、0 件で要確認なら、その旨の補足を 1 行ずつ出す。
+# inventory_notes [kind...]
+# 指定した kind（省略したらすべて）のインベントリが取得失敗か、0 件で要確認なら、その旨の補足を 1 行ずつ出す。
 # 照合の対象から漏れているおそれがあるので、呼び出し側は warn にする。
 inventory_notes() {
   ensure_inventory || return 1
-  jq -r '.[] | select(.layer == "inventory" and (.source | IN($ARGS.positional[])))
+  jq -r '.[] | select(.layer == "inventory" and (($ARGS.positional | length) == 0 or (.source | IN($ARGS.positional[]))))
     | if .status == "error" then "インベントリの \(.source) を取得できなかったため照合していません"
       elif .status == "warn" and .count == 0 then "インベントリの \(.source) が 0 件（要確認）のため照合していません"
       else empty end' "$INVENTORY_FILE" --args -- "$@"
@@ -1062,6 +1064,258 @@ layer2_vscode() {
 
 cmd_vscode() {
   run_source vscode layer2 layer2_vscode
+}
+
+# --- 層1（§6） ---
+
+LAYER1_DAYS=30
+
+# 緩い名前一致（§6）の jq の定義。英数字のトークンに分けて小文字化し、インベントリの名前のトークンと重なれば候補にする。
+# server や manager のような一般的な語は、無関係な製品と大量に一致して絞り込めなくなるので除く。
+# macOS と Safari は名前に Apple を含まないので apple を足す（KEV の Apple の多くは製品名が Multiple Products）
+# shellcheck disable=SC2016 # $ は jq の変数
+MATCH_JQ='
+  def stopwords: ["a", "an", "and", "the", "of", "for", "on", "in", "to", "with", "by", "from", "via", "or",
+    "multiple", "products", "product", "series", "edition", "editions", "version", "versions", "release",
+    "server", "servers", "client", "clients", "service", "services", "manager", "management", "console", "center", "centre",
+    "portal", "gateway", "web", "http", "https", "ftp", "net", "core", "framework", "runtime", "sdk", "api",
+    "app", "apps", "application", "applications", "desktop", "mobile", "cloud", "platform", "software", "system", "systems",
+    "suite", "enterprise", "professional", "pro", "standard", "community", "plugin", "plugins", "extension", "extensions",
+    "module", "modules", "component", "components", "driver", "drivers", "library", "libraries", "tool", "tools",
+    "utils", "utility", "utilities", "kit", "open", "unit", "test", "connect", "connection", "control", "support", "builder",
+    "protection", "protocol", "session", "cache", "xml", "mail", "data", "file", "files", "user", "users", "admin", "agent",
+    "engine", "interface", "remote", "access", "network", "security", "secure", "firmware", "device", "devices", "multi", "ng",
+    "theme", "language", "pack", "common", "base", "info", "information", "media", "content", "document", "documents",
+    "js", "io", "os", "ui"];
+  def tokens: ascii_downcase | [splits("[^a-z0-9]+")] | map(select(length > 1 and (test("^[0-9]+$") | not))) - stopwords | unique;
+  # インベントリの項目の配列から「トークン → 項目（kind 名前）の配列」を作る
+  def token_index: reduce (.[] | "\(.kind) \(.name)" as $key
+      | (.name | tokens) + (if .kind == "macos" then ["apple"] else [] end) | .[] | {token: ., key: $key}) as $e
+    ({}; .[$e.token] += [$e.key]) | map_values(unique);
+  # $tokens がインベントリと重なれば、入力に tokens（重なったトークン）と matched（一致した項目）を足して出す。
+  # 重ならなければ何も出さない
+  def candidate($index; $tokens): ($tokens | map(select($index[.] != null))) as $hit
+    | select($hit | length > 0) | . + {tokens: $hit, matched: ([$hit[] | $index[.][]] | unique)};
+'
+
+# KEV の全件を読み、ベンダー名と製品名がインベントリと緩く一致するものを候補にする。count は全件数（§6）
+layer1_kev() {
+  local kev="$WORK_DIR/kev.json" index="$WORK_DIR/kev-index.json" items="$WORK_DIR/kev-items.json" text note total status=ok evidence
+  local notes=()
+  ensure_inventory
+  text="$(inventory_notes)"
+  while IFS= read -r note; do
+    if [ -n "$note" ]; then
+      status=warn
+      notes+=("$note")
+    fi
+  done <<<"$text"
+  inventory_items | jq -c "$MATCH_JQ"'token_index' >"$index"
+  fetch_source kev layer1 "$KEV_URL" "$kev" --compressed || return 0
+  total="$(jq -e '.vulnerabilities | if type == "array" then length else error("KEV の応答に vulnerabilities がありません") end' "$kev")"
+  if [ "$total" -eq 0 ]; then
+    status=warn
+    notes+=("0 件でした")
+  fi
+  # references は notes の URL のうち、CISA の定型の案内と NVD（CVE から引ける）を除いたもの
+  jq -c --slurpfile index "$index" "$MATCH_JQ"'[.vulnerabilities[]
+    | {cve: .cveID, vendor: .vendorProject, product, name: .vulnerabilityName, date_added: .dateAdded,
+       ransomware: .knownRansomwareCampaignUse,
+       references: [.notes // "" | scan("https?://[^ ;]+") | select(test("^https?://([^/]*\\.)?(cisa\\.gov|nvd\\.nist\\.gov)/") | not)]}
+    | candidate($index[0]; "\(.vendor) \(.product)" | tokens)]' "$kev" >"$items"
+  evidence="$(jq -c --arg url "$KEV_URL" --argjson candidates "$(jq length "$items")" \
+    '{url: $url, total: (.vulnerabilities | length), candidates: $candidates, catalog_version: .catalogVersion,
+      date_released: .dateReleased}' "$kev")"
+  envelope kev layer1 "$status" "$total" "$evidence" ${notes[@]+"${notes[@]}"} <"$items"
+}
+
+cmd_kev() {
+  run_source kev layer1 layer1_kev
+}
+
+# RSS 1.0（JVN、JPCERT/CC）の項目から読む要素。項目の区切りに rdf:about を使う
+RSS_XPATH='//*[local-name()="item"]/@*[local-name()="about"]
+  | //*[local-name()="item"]/*[local-name()="title" or local-name()="link" or local-name()="identifier" or local-name()="date"
+    or local-name()="issued" or local-name()="description" or local-name()="references" or local-name()="cpe" or local-name()="cvss"]'
+
+# xmllint --xpath "$RSS_XPATH" の出力（文書順に 1 ノードずつ。属性は「 rdf:about="…"」、要素は 1 つの XML の断片）を項目にまとめる jq。
+# 本文の < は &lt; になっている（CDATA は --nocdata で本文にする）ので、< で始まる行は要素の始まり、それ以外は前の要素の続き。
+# xmllint は数値文字参照を 10 進で出す
+# shellcheck disable=SC2016 # $ は jq の変数
+RSS_JQ='
+  def unescape: if contains("&") | not then . else
+    gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&quot;"; "\"") | gsub("&apos;"; [39] | implode)
+    | gsub("&#(?<n>[0-9]+);"; [.n | tonumber] | implode) | gsub("&amp;"; "&") end;
+  def attributes: if . == "" then {} else
+    [scan("([A-Za-z_][\\w.:-]*)=\"([^\"]*)\"") | {key: (.[0] | sub("^.*:"; "")), value: (.[1] | unescape)}] | from_entries end;
+  reduce inputs as $line ([];
+    if ($line | test("^<[^/]")) or ($line | test("^ [^ =<]*about=\"")) then . + [$line]
+    elif length > 0 then .[-1] += "\n" + $line else . end)
+  | reduce (.[] | capture("^ [^ =<]*about=\"(?<about>[^\"]*)\"$")
+      // capture("^<(?:[A-Za-z_][\\w.-]*:)?(?<name>[A-Za-z_][\\w.-]*)(?<attrs>[^>]*?)(?:/>|>(?<text>[^<]*)</[^>]+>)$")
+      // {unparsed: true}) as $r
+    ({items: [], unparsed: 0};
+      if $r.unparsed then .unparsed += 1
+      elif $r.about then .items += [{about: ($r.about | unescape), fields: []}]
+      elif (.items | length) > 0 then
+        .items[-1].fields += [{name: $r.name, text: (($r.text // "") | unescape), attrs: ($r.attrs | attributes)}]
+      else .unparsed += 1 end)
+  | {total: $total, unparsed, items: [.items[] | .fields as $f
+      | def one($name): first($f[] | select(.name == $name) | .text) // null;
+      {about, title: one("title"), link: one("link"), identifier: one("identifier"), date: one("date"), issued: one("issued"),
+       description: one("description"), references: [$f[] | select(.name == "references") | .attrs + {url: .text}],
+       cpe: [$f[] | select(.name == "cpe") | .text], cvss: [$f[] | select(.name == "cvss") | .attrs]}]}
+'
+
+# 取得範囲（§6）の jq の定義
+# shellcheck disable=SC2016 # $ は jq の変数
+RSS_WINDOW_JQ='
+  # ISO 8601 をエポック秒にする（時差が無ければ $zone）。読めなければ null
+  def iso_epoch($zone): if type != "string" then null else
+    (capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})(T(?<t>[0-9]{2}:[0-9]{2})(?<s>:[0-9]{2})?(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?)?$") // null)
+    | if . == null then null else
+        try (("\(.d)T\(.t // "00:00")\(.s // ":00")" | strptime("%Y-%m-%dT%H:%M:%S") | mktime)
+          - ((.z // $zone) | if . == "Z" then 0 else sub(":"; "") as $z
+              | (($z[1:3] | tonumber) * 3600 + ($z[3:5] | tonumber) * 60) * (if $z[0:1] == "-" then -1 else 1 end) end))
+        catch null end end;
+  # rss_items の出力から、target に当たる項目（補足では $label と呼ぶ）の直近の分（recent）と取得できた期間（period）、
+  # 要確認の補足（problems）を出す。直近かどうかは公開日（dcterms:issued、無ければ dc:date）で見る。期間は RSS の並びの日付
+  # （dc:date、無ければ dcterms:issued。JVN の RSS では更新日）の最小と最大で、最も古いものが $since より新しければ直近の分を取り切れていない
+  def rss_window($since; $since_iso; $days; $zone; $label; target):
+    .total as $total | .unparsed as $unparsed
+    | [.items[] | . + {published: (.issued // .date), published_epoch: ((.issued // .date) | iso_epoch($zone)),
+        order_epoch: ((.date // .issued) | iso_epoch($zone))}] as $all
+    | [$all[] | select(target)] as $target
+    | ([$target[] | select(.order_epoch != null)] | if length == 0 then null
+        else min_by(.order_epoch) as $old | max_by(.order_epoch) as $new
+        | {from: ($old.date // $old.issued), to: ($new.date // $new.issued), covered: ($old.order_epoch <= $since)} end) as $period
+    | {total: $total, target: ($target | length),
+       recent: [$target[] | select(.published_epoch != null and .published_epoch >= $since)],
+       period: ($period | if . then {from, to} else null end),
+       problems: [
+         (if $total == 0 then "0 件でした" else empty end),
+         (if $unparsed > 0 or ($all | length) != $total
+          then "RSS の項目を一部読めませんでした（\($total) 件中 \($all | length) 件。読めない要素 \($unparsed) 個）" else empty end),
+         ([$target[] | select(.published_epoch == null) | .identifier // .link // .about]
+          | if length > 0 then "日付を読めない\($label)があります: \(join(", "))" else empty end),
+         (if $period != null or $total == 0 then empty
+          elif ($target | length) == 0 then "\($label)が 1 件も無く、取得できた期間を確かめられません"
+          else "日付を読める\($label)が無く、取得できた期間を確かめられません" end),
+         (if $period == null then empty
+          elif $period.covered | not
+          then "直近 \($days) 日分を取り切れていません（取得できた期間: \($period.from) 〜 \($period.to)。\($since_iso) 以降が必要）"
+          else empty end)]};
+'
+
+# rss_items <ソース> <URL> <保存先>
+# RSS 1.0 を取得し、xmllint で項目を読んで {total, unparsed, items} を保存先に書く。total は xmllint が数えた項目の数。
+# 項目は {about, title, link, identifier, date, issued, description, references, cpe, cvss}（references と cvss は属性のオブジェクト）。
+# 取得に失敗したら error、空なら warn のエンベロープを出して 1 を返す。XML として読めなければ失敗する
+rss_items() {
+  local source="$1" url="$2" out="$3" rss="$WORK_DIR/$1.rdf" nodes="$WORK_DIR/$1.nodes" total
+  fetch_source "$source" layer1 "$url" "$rss" --compressed || return 1
+  total="$(xmllint --nocdata --xpath 'count(//*[local-name()="item"])' "$rss" 2>"$nodes")" ||
+    die "RSS を XML として読めません: $(head -n 1 "$nodes")"
+  if [ "$total" -eq 0 ]; then
+    : >"$nodes"
+  else
+    xmllint --nocdata --xpath "$RSS_XPATH" "$rss" >"$nodes"
+  fi
+  jq -R -n -c --argjson total "$total" "$RSS_JQ" "$nodes" >"$out"
+}
+
+# layer1_jvn_feed <ソース> <URL>
+# JVN iPedia の新着と JVN の RSS から、公開日が直近 30 日の項目のうちインベントリと緩く一致するものを候補にする。
+# 照合に使うのはタイトルと CPE の製品名。CPE のベンダー名にだけ当たる語（「GoogleのAndroid」の google）は除く。
+# Google や Apple の名前だけで Android や iOS の項目が大量に候補になるのを防ぐ。count は RSS から読んだ件数
+layer1_jvn_feed() {
+  local source="$1" url="$2" rss="$WORK_DIR/$1.json" index="$WORK_DIR/$1-index.json" result="$WORK_DIR/$1-result.json"
+  local text note since status=ok
+  local notes=("更新分は未確認（公開日が直近 ${LAYER1_DAYS} 日の項目だけを照合）")
+  ensure_inventory
+  text="$(inventory_notes)"
+  while IFS= read -r note; do
+    if [ -n "$note" ]; then
+      status=warn
+      notes+=("$note")
+    fi
+  done <<<"$text"
+  inventory_items | jq -c "$MATCH_JQ"'token_index' >"$index"
+  rss_items "$source" "$url" "$rss" || return 0
+  since="$(($(now_epoch) - LAYER1_DAYS * 86400))"
+  jq -c --argjson since "$since" --arg since_iso "$(epoch_to_iso "$since")" --argjson days "$LAYER1_DAYS" --arg zone "$(date +%z)" \
+    --arg url "$url" --slurpfile index "$index" "$MATCH_JQ$RSS_WINDOW_JQ"'
+    # cpe:/a:google:chrome（2.2）と cpe:2.3:a:google:chrome:…（2.3）のベンダー名と製品名
+    def cpe_part($i): split(":") | if .[1] == "2.3" then .[3 + $i] else .[2 + $i] end // "";
+    def match_tokens: (.cpe | map(cpe_part(1)) | join(" ") | tokens) as $products
+      | ("\(.title) \($products | join(" "))" | tokens) - ((.cpe | map(cpe_part(0)) | join(" ") | tokens) - $products);
+    rss_window($since; $since_iso; $days; $zone; "項目"; true) as $w
+    | [$w.recent[] | {id: (.identifier // .link // .about), title, link: (.link // .about), published,
+        cves: ([(.references[] | select(.source == "CVE") | .id), ("\(.title) \(.description // "")" | scan("CVE-[0-9]{4}-[0-9]+"))] | unique),
+        cpe, cvss: (.cvss | sort_by(.version // "" | tonumber? // 0) | last | .score? | tonumber? // null),
+        description: (.description // "" | gsub("<[^>]*>"; " ") | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")
+          | if length > 120 then .[:120] + "…" else . end | select(. != "") // null)}
+      | candidate($index[0]; match_tokens)] as $items
+    | {items: $items, problems: $w.problems,
+       evidence: {url: $url, total: $w.total, recent: ($w.recent | length), candidates: ($items | length), period: $w.period,
+                  since: $since_iso, days: $days}}' "$rss" >"$result"
+  text="$(jq -r '.problems[]' "$result")"
+  while IFS= read -r note; do
+    if [ -n "$note" ]; then
+      status=warn
+      notes+=("$note")
+    fi
+  done <<<"$text"
+  jq -c .items "$result" |
+    envelope "$source" layer1 "$status" "$(jq .evidence.total "$result")" "$(jq -c .evidence "$result")" "${notes[@]}"
+}
+
+cmd_jvn() {
+  run_source jvn-ipedia layer1 layer1_jvn_feed jvn-ipedia "$JVN_IPEDIA_URL"
+  run_source jvn layer1 layer1_jvn_feed jvn "$JVN_URL"
+}
+
+# JPCERT/CC の RSS のうち注意喚起（Weekly Report などを除く）で、日付が直近 30 日のものを全件出す。
+# この RSS の日付は dc:date だけで、更新された注意喚起では更新日。count は RSS から読んだ件数
+layer1_jpcert() {
+  local rss="$WORK_DIR/jpcert.json" result="$WORK_DIR/jpcert-result.json" text note since status=ok
+  local notes=()
+  rss_items jpcert "$JPCERT_URL" "$rss" || return 0
+  since="$(($(now_epoch) - LAYER1_DAYS * 86400))"
+  jq -c --argjson since "$since" --arg since_iso "$(epoch_to_iso "$since")" --argjson days "$LAYER1_DAYS" --arg zone "$(date +%z)" \
+    --arg url "$JPCERT_URL" "$RSS_WINDOW_JQ"'
+    rss_window($since; $since_iso; $days; $zone; "注意喚起";
+      (.link // .about // "" | test("/at/")) or (.title // "" | startswith("注意喚起"))) as $w
+    | [$w.recent[] | {id: (.identifier // .link // .about), title, link: (.link // .about), published,
+        cves: ([.title // "" | scan("CVE-[0-9]{4}-[0-9]+")] | unique)}] as $items
+    | {items: $items, problems: $w.problems,
+       evidence: {url: $url, total: $w.total, alerts: $w.target, recent: ($items | length), period: $w.period,
+                  since: $since_iso, days: $days}}' "$rss" >"$result"
+  text="$(jq -r '.problems[]' "$result")"
+  while IFS= read -r note; do
+    if [ -n "$note" ]; then
+      status=warn
+      notes+=("$note")
+    fi
+  done <<<"$text"
+  jq -c .items "$result" |
+    envelope jpcert layer1 "$status" "$(jq .evidence.total "$result")" "$(jq -c .evidence "$result")" ${notes[@]+"${notes[@]}"}
+}
+
+cmd_jpcert() {
+  run_source jpcert layer1 layer1_jpcert
+}
+
+# inventory を 1 度だけ実行し、その結果で他のすべてを実行する（§3.4）
+cmd_all() {
+  ensure_inventory
+  jq -c '.[]' "$INVENTORY_FILE"
+  cmd_osv
+  cmd_latest
+  cmd_vscode
+  cmd_kev
+  cmd_jvn
+  cmd_jpcert
 }
 
 cmd_compare() {
