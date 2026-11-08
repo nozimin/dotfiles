@@ -1,0 +1,48 @@
+#!/bin/bash
+# Homebrew をインストールし、~/.zprofile に brew shellenv を追記する。
+# 何度実行しても、済んでいる手順はスキップする。
+# shellcheck disable=SC2088 # メッセージ中の ~ は表示用
+
+# shellcheck source=cmd/common.sh
+source "$(dirname "$0")/common.sh"
+
+HOMEBREW_INSTALLER_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+BREW_BIN="$(brew_prefix)/bin/brew"
+ZPROFILE="$HOME/.zprofile"
+
+install_brew() {
+  if [ -x "$BREW_BIN" ]; then
+    ok "Homebrew はインストール済み ($BREW_BIN)"
+    return 0
+  fi
+  ask_yes_no "Homebrew が見つかりません。インストールしますか？" || {
+    warn "Homebrew のインストールをスキップしました"
+    return 2
+  }
+  echo "途中で Enter とパスワードの入力を求められます。"
+  /bin/bash -c "$(curl -fsSL "$HOMEBREW_INSTALLER_URL")" || {
+    error "Homebrew のインストールに失敗しました"
+    return 1
+  }
+  [ -x "$BREW_BIN" ] || {
+    error "インストール後も $BREW_BIN が見つかりません"
+    return 1
+  }
+  ok "Homebrew をインストールしました"
+}
+
+add_shellenv() {
+  if [ -f "$ZPROFILE" ] && grep -qF "brew shellenv" "$ZPROFILE"; then
+    ok "~/.zprofile に brew shellenv は追記済み"
+    return 0
+  fi
+  append_block "$ZPROFILE" "$MARKER: homebrew" "eval \"\$($BREW_BIN shellenv)\"" || {
+    warn "~/.zprofile への追記をスキップしました"
+    return 2
+  }
+}
+
+install_brew
+status=$?
+[ "$status" -eq 0 ] || exit "$status"
+add_shellenv

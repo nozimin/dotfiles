@@ -1,0 +1,191 @@
+#!/bin/bash
+# Mac の開発環境をまとめてセットアップする。
+# 何度実行しても、済んでいる手順は質問せずにスキップする。
+# shellcheck disable=SC2088 # メッセージ中の ~ は表示用
+
+# shellcheck source=cmd/common.sh
+source "$(dirname "$0")/common.sh"
+
+FAILED=()
+SKIPPED=()
+
+fail() { error "$1: $2"; FAILED+=("$1"); }
+skip() { warn "$1 をスキップしました"; SKIPPED+=("$1"); }
+
+# Homebrew 本体と ~/.zprofile の brew shellenv
+setup_homebrew() {
+  "$REPO_ROOT/cmd/install_brew"
+  case $? in
+    0) ;;
+    2) skip "Homebrew" ;;
+    *) fail "Homebrew" "cmd/install_brew が失敗しました" ;;
+  esac
+  load_brew
+}
+
+# lib/Brewfile のパッケージ
+setup_brew_bundle() {
+  local brewfile="$LIB_DIR/Brewfile" output
+  if ! command -v brew >/dev/null 2>&1; then
+    skip "Brewfile（Homebrew がありません）"
+    return
+  fi
+  if output="$(HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --file="$brewfile" --no-upgrade --verbose 2>&1)"; then
+    ok "Brewfile のパッケージはすべてインストール済み"
+    return
+  fi
+  echo "Brewfile のうち、次のものが未インストールです:"
+  printf '%s\n' "$output" | sed -n 's/^→ /    /p'
+  ask_yes_no "インストールしますか？" || {
+    skip "Brewfile"
+    return
+  }
+  brew bundle install --file="$brewfile" --no-upgrade || fail "Brewfile" "一部のパッケージのインストールに失敗しました"
+}
+
+# ~/.zshrc から lib/zshrc を読み込む
+setup_zsh() {
+  local zshrc="$HOME/.zshrc" line="source \"$LIB_DIR/zshrc\""
+  if has_block "$zshrc" "$MARKER"; then
+    if grep -qF "$line" "$zshrc"; then
+      ok "~/.zshrc から lib/zshrc を読み込み済み"
+    else
+      fail "zsh" "~/.zshrc の $MARKER ブロックが別の場所を指しています。$line に直してください"
+    fi
+    return
+  fi
+  append_block "$zshrc" "$MARKER" "$line" || skip "zsh"
+}
+
+# ~/.config/starship.toml -> lib/starship.toml
+setup_starship() {
+  local src="$LIB_DIR/starship.toml" dest="$HOME/.config/starship.toml"
+  if is_linked "$src" "$dest"; then
+    ok "starship の設定はリンク済み"
+    return
+  fi
+  ask_yes_no "starship の設定 ($(pretty_path "$dest")) を lib/starship.toml へのリンクにしますか？" || {
+    skip "starship"
+    return
+  }
+  link_file "$src" "$dest" || skip "starship"
+}
+
+# iTerm2 の設定を lib/com.googlecode.iterm2.plist から読み込み、変更を自動で保存する
+setup_iterm2() {
+  local domain="com.googlecode.iterm2"
+  if [ "$(defaults read "$domain" PrefsCustomFolder 2>/dev/null)" = "$LIB_DIR" ] &&
+    [ "$(defaults read "$domain" LoadPrefsFromCustomFolder 2>/dev/null)" = "1" ] &&
+    [ "$(defaults read "$domain" NoSyncNeverRemindPrefsChangesLostForFile 2>/dev/null)" = "1" ] &&
+    [ "$(defaults read "$domain" NoSyncNeverRemindPrefsChangesLostForFile_selection 2>/dev/null)" = "2" ]; then
+    ok "iTerm2 は lib/ の設定を読み込み済み"
+    return
+  fi
+  ask_yes_no "iTerm2 の設定を lib/com.googlecode.iterm2.plist から読み込むようにしますか？" || {
+    skip "iTerm2"
+    return
+  }
+  # 起動中に書き換えると、終了時に iTerm2 が設定を書き戻すことがある
+  if [ "$(osascript -e "application id \"$domain\" is running" 2>/dev/null)" = "true" ]; then
+    fail "iTerm2" "iTerm2 が起動中です。iTerm2 を終了し、Terminal.app から再実行してください"
+    return
+  fi
+  if ! {
+    defaults write "$domain" PrefsCustomFolder -string "$LIB_DIR" &&
+      defaults write "$domain" LoadPrefsFromCustomFolder -bool true &&
+      defaults write "$domain" NoSyncNeverRemindPrefsChangesLostForFile -bool true &&
+      defaults write "$domain" NoSyncNeverRemindPrefsChangesLostForFile_selection -int 2
+  }; then
+    fail "iTerm2" "defaults write に失敗しました"
+    return
+  fi
+  ok "iTerm2 の設定フォルダを $LIB_DIR にしました"
+}
+
+# gh で GitHub にログインし、git の認証に gh を使う
+setup_gh() {
+  if ! command -v gh >/dev/null 2>&1; then
+    skip "GitHub ログイン（gh がありません）"
+    return
+  fi
+  if gh auth status --hostname github.com >/dev/null 2>&1; then
+    ok "gh は GitHub にログイン済み"
+  else
+    ask_yes_no "gh で GitHub にログインしますか？（ブラウザが開きます）" || {
+      skip "GitHub ログイン"
+      return
+    }
+    gh auth login --hostname github.com --git-protocol https --web || {
+      fail "GitHub ログイン" "gh auth login が失敗しました"
+      return
+    }
+  fi
+  if git config --global --get-all credential.https://github.com.helper 2>/dev/null | grep -qF "gh auth git-credential"; then
+    ok "git の認証に gh を使う設定は済み"
+    return
+  fi
+  ask_yes_no "git の認証に gh を使うように設定しますか？（gh auth setup-git）" || {
+    skip "gh auth setup-git"
+    return
+  }
+  gh auth setup-git --hostname github.com || fail "gh auth setup-git" "設定に失敗しました"
+}
+
+# git のコミット作者（未設定なら GitHub の値をデフォルトにして入力してもらう）
+setup_git_user() {
+  local name email default_name="" default_email=""
+  name="$(git config --global user.name)"
+  email="$(git config --global user.email)"
+  if [ -n "$name" ] && [ -n "$email" ]; then
+    ok "git の user.name ($name) と user.email ($email) は設定済み"
+    return
+  fi
+  if command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com >/dev/null 2>&1; then
+    default_name="$(gh api user --jq '.name // .login' 2>/dev/null)"
+    default_email="$(gh api user --jq '.email // "\(.id)+\(.login)@users.noreply.github.com"' 2>/dev/null)"
+  fi
+  if [ -z "$name" ]; then
+    if name="$(ask_input "git の user.name" "$default_name")"; then
+      git config --global user.name "$name"
+    else
+      fail "git user.name" "入力がありませんでした"
+    fi
+  fi
+  if [ -z "$email" ]; then
+    if email="$(ask_input "git の user.email" "$default_email")"; then
+      git config --global user.email "$email"
+    else
+      fail "git user.email" "入力がありませんでした"
+    fi
+  fi
+}
+
+summary() {
+  step "まとめ"
+  if [ "${#SKIPPED[@]}" -gt 0 ]; then
+    warn "スキップしたもの:"
+    printf '    %s\n' "${SKIPPED[@]}" >&2
+  fi
+  if [ "${#FAILED[@]}" -gt 0 ]; then
+    error "失敗したもの（直してから再実行してください）:"
+    printf '    %s\n' "${FAILED[@]}" >&2
+    exit 1
+  fi
+  ok "セットアップが終わりました。新しいターミナルを開くと設定が反映されます"
+}
+
+step "Homebrew"
+setup_homebrew
+step "Brewfile"
+setup_brew_bundle
+step "zsh"
+setup_zsh
+step "starship"
+setup_starship
+step "iTerm2"
+setup_iterm2
+step "GitHub (gh)"
+setup_gh
+step "git"
+setup_git_user
+summary

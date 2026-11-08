@@ -1,3 +1,21 @@
+# config_for_mac の共通 zsh 設定
+# ~/.zshrc から source して使う（cmd/setup が追記する）
+
+# 補完（brew shellenv が fpath に追加した補完も読み込む）
+autoload -Uz compinit && compinit
+
+# starship
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init zsh)"
+
+  # Enter 押下時にプロンプトを再描画し、右プロンプトの時刻を実行時刻にする
+  function _reset_prompt_and_accept_line() {
+    zle reset-prompt
+    zle .accept-line
+  }
+  zle -N accept-line _reset_prompt_and_accept_line
+fi
+
 # Alias
 alias gb='echo $(git rev-parse --abbrev-ref HEAD)'
 alias gb_like='git branch @g $1'
@@ -9,19 +27,3 @@ alias gtree='git log --graph -30 --format="%x09%an%x09%h %d"'
 alias gs='git status -s | cut -c4-'
 alias gds='git diff --name-only origin/master'
 alias gdc="git diff --stat -w -B -I '^\s*\/' origin/master"
-
-# iterm
-# test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
-
-# starship
-eval "$(starship init zsh)"
-
-# git-completionの読み込み
-# fpath=(~/.zsh $fpath)
-# zstyle ':completion:*:*:git:*' script ~/.zsh/git-completion.bash
-# autoload -Uz compinit && compinit
-
-# rbenv
-eval "$(rbenv init - zsh)"
-
-# ============
