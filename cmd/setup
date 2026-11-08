@@ -155,6 +155,37 @@ setup_git_user() {
   fi
 }
 
+# ~/.claude/skills/<名前> -> lib/claude/skills/<名前>
+# skill ごとにリンクする。~/.claude/skills にあるほかの skill はそのまま残す。
+# ~/.claude/skills の中に退避すると退避したものも skill として読み込まれるので、外に退避する。
+setup_claude_skills() {
+  local dir src dest name found=""
+  for dir in "$LIB_DIR"/claude/skills/*/; do
+    # lib/claude/skills/ が無いか空のときは、パターンがそのまま残る
+    [ -d "$dir" ] || continue
+    found=1
+    src="${dir%/}"
+    name="${src##*/}"
+    dest="$HOME/.claude/skills/$name"
+    if is_linked "$src" "$dest"; then
+      ok "$(pretty_path "$dest") はリンク済み"
+      continue
+    fi
+    if [ ! -L "$dest" ] && [ "$dest" -ef "$src" ]; then
+      # ~/.claude/skills ごとリポジトリを指していると、退避でリポジトリの中身を動かしてしまう
+      fail "Claude skill $name" "~/.claude/skills が lib/claude/skills を指しています。skill ごとのリンクに置き換えてから再実行してください"
+      continue
+    fi
+    if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+      echo "$(pretty_path "$dest") の中身:"
+      # shellcheck disable=SC2012 # 表示するだけ
+      ls -lA "$dest" | sed 's/^/    /'
+    fi
+    link_file "$src" "$dest" "$HOME/.claude/skills-backup" || skip "Claude skill $name"
+  done
+  [ -n "$found" ] || ok "lib/claude/skills/ にリンクする skill はありません"
+}
+
 summary() {
   step "まとめ"
   if [ "${#SKIPPED[@]}" -gt 0 ]; then
@@ -183,4 +214,6 @@ step "GitHub (gh)"
 setup_gh
 step "git"
 setup_git_user
+step "Claude skills"
+setup_claude_skills
 summary

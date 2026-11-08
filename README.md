@@ -27,12 +27,13 @@ git clone https://github.com/nozimin/dotfiles.git ~/WorkSpace/Repositories/dotfi
 | iTerm2 | iTerm2 が `lib/com.googlecode.iterm2.plist` を読み込み、変更を自動で保存するようにする | [lib/iterm2.md](lib/iterm2.md) |
 | GitHub (gh) | `gh auth login` でログインし、`gh auth setup-git` で git の認証に gh を使う | [lib/git.md](lib/git.md) |
 | git | `user.name` と `user.email` が未設定なら入力してもらう | [lib/git.md](lib/git.md) |
+| Claude skills | `lib/claude/skills/` の skill ごとに、`~/.claude/skills/<名前>` をシンボリックリンクにする | [lib/claude.md](lib/claude.md) |
 
 `~/.zshrc` などへの追記や、既存ファイルの退避は、内容を表示して確認してから行う。最後にスキップしたものと失敗したものを表示する。失敗があれば終了コードは 1。
 
 ## リポジトリを移動したとき
 
-`~/.zshrc` の source 行、`~/.config/starship.toml` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。
+`~/.zshrc` の source 行、`~/.config/starship.toml` と `~/.claude/skills/<名前>` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。
 
 iTerm2 の手順は iTerm2 を終了しないと実行できないので、Terminal.app から実行する。
 
@@ -48,7 +49,10 @@ lib/
   zshrc                        共通の zsh 設定（~/.zshrc から source する）
   starship.toml                starship の設定
   com.googlecode.iterm2.plist  iTerm2 の設定
+  claude/skills/               Claude Code の skill（skill ごとに ~/.claude/skills へリンクする）
   *.md                         各ツールのドキュメント
+docs/
+  specs/         仕様書（実装の正。食い違いは実装側を直す）
 ```
 
 ## ツールを追加する
