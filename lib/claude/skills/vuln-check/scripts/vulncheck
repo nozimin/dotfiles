@@ -17,7 +17,8 @@
 #   関数をサブシェルで実行し、途中で失敗したら error のエンベロープにする。ソースごとに囲み、他のソースを止めない。
 # - inventory_items [kind...] でインベントリの項目を JSON 配列で得る（--inventory が無ければその場で集める）。
 #   エンベロープごと読むときは ensure_inventory のあと $INVENTORY_FILE を jq で読む。
-#   照合に使う kind のインベントリが取得失敗かどうかは inventory_notes [kind...] で補足として得る。
+#   照合に使う kind のインベントリの欠け（取得失敗か要確認）は inventory_notes [kind...] で補足として得て、
+#   add_warn_notes で呼び出し側の notes に足して warn にする（ソースの要確認の補足も add_warn_notes で足す）。
 # - now_epoch / now_iso は現在時刻（VULNCHECK_NOW で差し替え）。iso_to_epoch / epoch_to_iso で変換する。
 # - version_compare <A> <B> は lt / eq / gt を出す。比較できなければ 2 を返す。
 # - 一時ファイルは $WORK_DIR に置く（終了時に消す）。
@@ -344,7 +345,7 @@ inventory_missing() {
 }
 
 # with_empty_reason <evidence の JSON> <0 件を示す出力の要点>
-# 0 件が正常であり得る kind（npm / pnpm / uv / vscode / brew-cask / ruby）で、ツールの出力が 0 件を示しているときに
+# 0 件が正常であり得る kind（npm / pnpm / uv / vscode / brew-cask / ruby と、Ruby が無いときの gem）で、ツールの出力が 0 件を示しているときに
 # evidence に empty_reason を足す（inventory_result はこれがあれば 0 件でも ok にする）
 with_empty_reason() {
   jq -c --arg reason "$2" '. + {empty_reason: $reason}' <<<"$1"
@@ -536,6 +537,10 @@ inventory_gem() {
       | {kind: "gem", name: $name, version: ., origin: $origin, bundle_id: null, path: null}] | unique' "$out" >>"$items"
   done <<<"$rubies"
   evidence="$(jq -s -c '{command: "gem list --local", rubies: length, gems: (add // [] | map(.name) | unique | length)}' "$items")"
+  # Ruby が 1 つも無ければ gem も無いので 0 件で ok（§4）。照合する側に warn を広げない
+  if [ -z "${rubies//[[:space:]]/}" ]; then
+    evidence="$(with_empty_reason "$evidence" "rbenv に Ruby が無い（rbenv versions --bare が空）")"
+  fi
   jq -s -c 'add // []' "$items" | inventory_result gem "$status" "$evidence" ${notes[@]+"${notes[@]}"}
 }
 
@@ -631,14 +636,28 @@ fetch_many() {
 }
 
 # inventory_notes [kind...]
-# 指定した kind（省略したらすべて）のインベントリが取得失敗か、0 件で要確認なら、その旨の補足を 1 行ずつ出す。
-# 照合の対象から漏れているおそれがあるので、呼び出し側は warn にする。
+# 指定した kind（省略したらすべて）のインベントリが取得失敗か要確認（0 件のときも、一部の取得の失敗で項目があるときも）なら、
+# その旨の補足を 1 行ずつ出す。照合の対象から漏れているおそれがあるので、呼び出し側は add_warn_notes で warn にする（§3.1）。
 inventory_notes() {
   ensure_inventory || return 1
   jq -r '.[] | select(.layer == "inventory" and (($ARGS.positional | length) == 0 or (.source | IN($ARGS.positional[]))))
     | if .status == "error" then "インベントリの \(.source) を取得できなかったため照合していません"
       elif .status == "warn" and .count == 0 then "インベントリの \(.source) が 0 件（要確認）のため照合していません"
+      elif .status == "warn" then "インベントリの \(.source) が要確認のため、照合が漏れているおそれがあります: \(.notes | join("; ") | .[:200])"
       else empty end' "$INVENTORY_FILE" --args -- "$@"
+}
+
+# add_warn_notes <補足（改行区切り）>
+# 空でない補足を呼び出し側の notes に足し、1 つでもあれば呼び出し側の status を warn にする（呼び出し側の local を書き換える）。
+# inventory_notes の結果や、ソースの要確認の補足に使う
+add_warn_notes() {
+  local note
+  while IFS= read -r note; do
+    if [ -n "$note" ]; then
+      status=warn
+      notes+=("$note")
+    fi
+  done <<<"$1"
 }
 
 # OSV の CVSS v3 のベクターから基本値を計算する jq の定義（OSV はベクターしか返さない）。v4 などは null
@@ -670,16 +689,11 @@ layer2_osv() {
   local all="$WORK_DIR/osv-all.json" packages="$WORK_DIR/osv-packages.json" query="$WORK_DIR/osv-query.json"
   local batch="$WORK_DIR/osv-batch.json" results="$WORK_DIR/osv-results.jsonl" matches="$WORK_DIR/osv-matches.json"
   local ids="$WORK_DIR/osv-ids.json" list="$WORK_DIR/osv-vulns.tsv" report="$WORK_DIR/osv-report.tsv"
-  local details="$WORK_DIR/osv-details.json" text note total i n evidence status=ok file rc
+  local details="$WORK_DIR/osv-details.json" text total i n evidence status=ok file rc
   local notes=() files=()
   ensure_inventory
   text="$(inventory_notes npm pnpm uv gem)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   inventory_items npm pnpm uv gem |
     jq -c 'map(. + {ecosystem: {npm: "npm", pnpm: "npm", uv: "PyPI", gem: "RubyGems"}[.kind]})' >"$all"
   # バージョン不明のパッケージは項目ごとの要確認（インベントリの review）なので warn にしない
@@ -818,16 +832,11 @@ latest_result() {
 # homebrew/core 以外の tap と 404 は unmapped。全件 404 なら URL の誤りとして、404 以外の失敗は 1 件でも error にする
 latest_brew_formula() {
   local formulae="$WORK_DIR/formulae.json" list="$WORK_DIR/formulae.tsv" report="$WORK_DIR/formulae-report.tsv"
-  local fetched="$WORK_DIR/formulae-fetched.json" api="$WORK_DIR/formulae-api.json" text note file rc status=ok evidence
+  local fetched="$WORK_DIR/formulae-fetched.json" api="$WORK_DIR/formulae-api.json" text file rc status=ok evidence
   local notes=() files=()
   ensure_inventory
   text="$(inventory_notes brew-formula)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   inventory_items brew-formula | jq -c --arg dir "$WORK_DIR" 'to_entries | map(.value + {file: "\($dir)/formula-\(.key).json"})' >"$formulae"
   jq -r --arg url "$BREW_FORMULA_URL" '.[] | select(.origin == "homebrew/core") | "\($url)/\(.name).json\t\(.file)"' \
     "$formulae" >"$list"
@@ -884,12 +893,7 @@ latest_cask() {
   local notes=()
   ensure_inventory
   text="$(inventory_notes brew-cask app)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   inventory_items brew-cask app | jq -c 'map(select(.kind == "brew-cask" or .origin != "appstore"))' >"$targets"
   evidence="$(jq -nc --arg url "$url" '{url: $url}')"
   if [ "$(jq length "$targets")" -eq 0 ]; then
@@ -948,16 +952,11 @@ latest_cask() {
 
 # App Store のアプリは iTunes Lookup API で bundle id から引く（Mac 版だけを採る）
 latest_itunes() {
-  local targets="$WORK_DIR/itunes-targets.json" out="$WORK_DIR/itunes.json" url text note count status=ok evidence
+  local targets="$WORK_DIR/itunes-targets.json" out="$WORK_DIR/itunes.json" url text count status=ok evidence
   local notes=()
   ensure_inventory
   text="$(inventory_notes app)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   inventory_items app | jq -c 'map(select(.origin == "appstore"))' >"$targets"
   url="$ITUNES_URL?entity=macSoftware&bundleId=$(jq -r '[.[].bundle_id | strings | @uri] | join(",")' "$targets")"
   evidence="$(jq -nc --arg url "$url" '{url: $url}')"
@@ -982,16 +981,11 @@ latest_itunes() {
 # macOS 本体と Safari は softwareupdate --list に更新が出ているかで判定する（Safari だけの更新もある）。
 # 出ていれば outdated: true で、latest はその版（同じメジャーの更新を優先）。出ていなければ latest はインストール済みの版
 latest_softwareupdate() {
-  local out="$WORK_DIR/softwareupdate.txt" err="$WORK_DIR/softwareupdate.err" entries text note status=ok evidence parsed=true
+  local out="$WORK_DIR/softwareupdate.txt" err="$WORK_DIR/softwareupdate.err" entries text status=ok evidence parsed=true
   local notes=()
   ensure_inventory
   text="$(inventory_notes macos)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   softwareupdate --list </dev/null >"$out" 2>"$err" || die "softwareupdate --list が失敗しました: $(tail -n 3 "$err")"
   # 例: * Label: macOS Tahoe 27.2.1-26C123
   #     	Title: macOS Tahoe 27.2.1, Version: 27.2.1, Size: 1234567KiB, Recommended: YES, Action: restart,
@@ -1022,16 +1016,11 @@ latest_softwareupdate() {
 
 # rbenv の Ruby は endoflife.date で同じサイクル（3.3 など）の最新パッチと EOL を取る。ruby 以外（jruby など）は unmapped
 latest_endoflife() {
-  local targets="$WORK_DIR/eol-targets.json" out="$WORK_DIR/eol-ruby.json" url="$EOL_URL/ruby.json" text note count=0 today status=ok evidence
+  local targets="$WORK_DIR/eol-targets.json" out="$WORK_DIR/eol-ruby.json" url="$EOL_URL/ruby.json" text count=0 today status=ok evidence
   local notes=()
   ensure_inventory
   text="$(inventory_notes ruby)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   inventory_items ruby >"$targets"
   evidence="$(jq -nc --arg url "$url" '{url: $url}')"
   if jq -e 'any(.[]; .name == "ruby")' "$targets" >/dev/null; then
@@ -1073,16 +1062,11 @@ cmd_latest() {
 
 # 削除済み一覧（Markdown の表「| 拡張 ID | 削除日 | 種別 |」）を読み、インストール済みの拡張と大文字小文字を区別せずに照合する（§5.3）
 layer2_vscode() {
-  local removed="$WORK_DIR/vscode-removed.md" list="$WORK_DIR/vscode-removed.json" text note count status=ok evidence
+  local removed="$WORK_DIR/vscode-removed.md" list="$WORK_DIR/vscode-removed.json" text count status=ok evidence
   local notes=()
   ensure_inventory
   text="$(inventory_notes vscode)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   fetch_source vscode layer2 "$VSCODE_REMOVED_URL" "$removed" --compressed || return 0
   # 末尾の | が無い行もある。削除日（11/5/2026）は 2026-11-05 にする
   jq -R -n -c '[inputs | select(startswith("|")) | ltrimstr("|") | split("|") | map(gsub("^\\s+|\\s+$"; ""))
@@ -1183,16 +1167,11 @@ MATCH_JQ='
 # KEV の全件を読み、ベンダー名と製品名がインベントリと緩く一致するものを候補にする。count は全件数（§6）。
 # 期間は dateAdded の最も古い日と新しい日、鮮度はカタログの dateReleased で見る
 layer1_kev() {
-  local kev="$WORK_DIR/kev.json" index="$WORK_DIR/kev-index.json" items="$WORK_DIR/kev-items.json" text note total status=ok evidence
+  local kev="$WORK_DIR/kev.json" index="$WORK_DIR/kev-index.json" items="$WORK_DIR/kev-items.json" text total status=ok evidence
   local notes=()
   ensure_inventory
   text="$(inventory_notes)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   inventory_items | jq -c "$MATCH_JQ"'token_index' >"$index"
   fetch_source kev layer1 "$KEV_URL" "$kev" --compressed || return 0
   total="$(jq -e '.vulnerabilities | if type == "array" then length else error("KEV の応答に vulnerabilities がありません") end' "$kev")"
@@ -1281,16 +1260,11 @@ rss_items() {
 # Google や Apple の名前だけで Android や iOS の項目が大量に候補になるのを防ぐ。count は RSS から読んだ件数
 layer1_jvn_feed() {
   local source="$1" url="$2" rss="$WORK_DIR/$1.json" index="$WORK_DIR/$1-index.json" result="$WORK_DIR/$1-result.json"
-  local text note status=ok
+  local text status=ok
   local notes=("更新分は未確認" "RSS が持っている範囲だけを照合（取得できた期間は evidence.period）")
   ensure_inventory
   text="$(inventory_notes)"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   inventory_items | jq -c "$MATCH_JQ"'token_index' >"$index"
   rss_items "$source" "$url" "$rss" || return 0
   jq -c --argjson now "$(now_epoch)" --argjson days "$LAYER1_STALE_DAYS" --arg zone "$(date +%z)" \
@@ -1309,12 +1283,7 @@ layer1_jvn_feed() {
     | {items: $items, problems: $s.problems,
        evidence: {url: $url, total: $s.total, candidates: ($items | length), period: $s.period, newest: $s.newest}}' "$rss" >"$result"
   text="$(jq -r '.problems[]' "$result")"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   jq -c .items "$result" |
     envelope "$source" layer1 "$status" "$(jq .evidence.total "$result")" "$(jq -c .evidence "$result")" "${notes[@]}"
 }
@@ -1327,7 +1296,7 @@ cmd_jvn() {
 # JPCERT/CC の RSS にある注意喚起（Weekly Report などを除く）を全件出す。期間は注意喚起の日付で、鮮度は Weekly Report を
 # 含む RSS 全体の日付で見る。この RSS の日付は dc:date だけで、更新された注意喚起では更新日。count は RSS から読んだ件数
 layer1_jpcert() {
-  local rss="$WORK_DIR/jpcert.json" result="$WORK_DIR/jpcert-result.json" text note status=ok
+  local rss="$WORK_DIR/jpcert.json" result="$WORK_DIR/jpcert-result.json" text status=ok
   local notes=()
   rss_items jpcert "$JPCERT_URL" "$rss" || return 0
   jq -c --argjson now "$(now_epoch)" --argjson days "$LAYER1_STALE_DAYS" --arg zone "$(date +%z)" \
@@ -1339,12 +1308,7 @@ layer1_jpcert() {
     | {items: $items, problems: $s.problems,
        evidence: {url: $url, total: $s.total, alerts: ($items | length), period: $s.period, newest: $s.newest}}' "$rss" >"$result"
   text="$(jq -r '.problems[]' "$result")"
-  while IFS= read -r note; do
-    if [ -n "$note" ]; then
-      status=warn
-      notes+=("$note")
-    fi
-  done <<<"$text"
+  add_warn_notes "$text"
   jq -c .items "$result" |
     envelope jpcert layer1 "$status" "$(jq .evidence.total "$result")" "$(jq -c .evidence "$result")" ${notes[@]+"${notes[@]}"}
 }

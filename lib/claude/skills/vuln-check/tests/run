@@ -93,6 +93,15 @@ EOF
 #!/bin/bash
 echo '{"dependencies": {"lodash": {"version": "4.17.15"}, "example-no-version": {}}}'
 EOF
+  # rbenv はあるが Ruby が 1 つも無い（7 で使う）
+  cat >"$FAKE_BIN/rbenv" <<'EOF'
+#!/bin/bash
+case "$1" in
+  versions) ;;
+  root) echo "$HOME/.rbenv" ;;
+  *) exit 1 ;;
+esac
+EOF
   chmod +x "$FAKE_BIN"/*
 }
 
@@ -333,6 +342,31 @@ for source in vscode npm; do
     'envelope($source) | .status == "ok" and .count == 2 and .evidence.review == 1
       and (.items | map(select(.review != null)) | length == 1 and .[0].version == null and (.[0].review | test("バージョン不明")))' \
     --arg source "$source"
+done
+
+step "7. silent failure の経路（フィクスチャと偽のコマンド。ネットワークは使わない）"
+# 照合に使うインベントリが一部欠けた（warn で項目あり）。npm は osv、app は cask-api と itunes、すべては層1が照合に使う
+jq 'map(if .source == "npm" or .source == "app" then .status = "warn" | .notes = ["一部の取得に失敗しました（試験）"] else . end)' \
+  "$INVENTORY" >"$TMP/inventory-partial.json"
+vulncheck osv --inventory "$TMP/inventory-partial.json"
+expect "osv: 照合に使う npm のインベントリが warn（項目あり）→ warn、notes に npm" \
+  'envelope("osv") | .status == "warn" and any(.notes[]; test("インベントリの npm"))'
+vulncheck latest --inventory "$TMP/inventory-partial.json"
+expect "cask-api と itunes: app のインベントリが warn（項目あり）→ warn。app を使わない brew-api は ok のまま" \
+  '([envelope("cask-api"), envelope("itunes")] | all(.status == "warn" and any(.notes[]; test("インベントリの app"))))
+    and envelope("brew-api").status == "ok"'
+vulncheck kev --inventory "$TMP/inventory-partial.json"
+expect "kev: インベントリの一部が warn（項目あり）→ warn" 'envelope("kev").status == "warn"'
+
+# rbenv に Ruby が無い。gem は 0 件でも ok で、gem を照合に使う osv と層1に warn が広がらない
+vulncheck inventory
+expect "inventory gem: rbenv に Ruby が無い → ok + count 0、evidence に根拠" \
+  'envelope("gem") | .status == "ok" and .count == 0 and (.evidence.empty_reason | test("Ruby が無い"))'
+jq --slurpfile run "$OUT" 'map(select(.source != "gem" and .source != "ruby"))
+  + [$run[0][] | select(.source == "gem" or .source == "ruby")]' "$INVENTORY" >"$TMP/inventory-no-ruby.json"
+for sub in osv kev jvn; do
+  vulncheck "$sub" --inventory "$TMP/inventory-no-ruby.json"
+  expect "$sub: rbenv に Ruby が無いインベントリ → すべて ok（warn が広がらない）" 'all(.[]; .status == "ok")'
 done
 
 step "まとめ"
