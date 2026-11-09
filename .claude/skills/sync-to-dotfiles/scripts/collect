@@ -37,10 +37,10 @@ function truncate(s, max,   i, n) {
 # ~/... $HOME/... ${HOME}/... /Users/... の形のパス（直前は行頭か、パスに使わない文字）
 # shellcheck disable=SC2016 # 正規表現の $HOME は文字どおり
 PATH_REF_RE='(^|[^[:alnum:]_./~$-])(~|\$HOME|\$\{HOME\}|/Users)/[^][:space:]"'\''`;:(){}|&<>*?$,[]*'
-# 秘密情報らしい名前への代入（$ で始まる値は、別の変数やコマンドの結果なので除く）
-SECRET_ASSIGN_RE='(token|secret|passw(or)?d|api[_-]?key)[[:alnum:]_-]*["'\'']?[[:space:]]*[:=][[:space:]]*["'\'']?[^[:space:]"'\''$]'
-# よく知られた形のトークン
-SECRET_VALUE_RE='(^|[^[:alnum:]_-])(ghp_[[:alnum:]]{20,}|gho_[[:alnum:]]{20,}|github_pat_[[:alnum:]_]{20,}|sk-[[:alnum:]_-]{16,}|xox[a-z]-[[:alnum:]-]{10,}|AKIA[0-9A-Z]{16})'
+# よく知られた形のトークン（単語の先頭で、ある程度の長さが続くもの）
+SECRET_VALUE_RE='(^|[^[:alnum:]_-])(ghp_[[:alnum:]]{20,}|gho_[[:alnum:]]{20,}|github_pat_[[:alnum:]_]{20,}|sk-[[:alnum:]_-]{16,}|sk_live_[[:alnum:]]{16,}|rk_live_[[:alnum:]]{16,}|xox[[:alnum:]]-[[:alnum:]-]{10,}|AKIA[0-9A-Z]{16})'
+# URL の中の認証情報（://<ユーザー>:<パスワード>@）。$ で始まるパスワードは、別の変数なので除く
+SECRET_URL_RE='://[^/[:space:]:@]*:[^$/[:space:]@][^/[:space:]@]*@'
 
 fatal() {
   printf 'collect: %s\n' "$1" >&2
@@ -131,8 +131,52 @@ has_missing_path() {
   return 1
 }
 
+# 秘密情報らしい名前の変数への代入があるか。行を単語に分け、コマンドの先頭と export などの引数にある
+# NAME=値 だけを代入とみなす（alias の定義や [[ ... == ... ]] の比較は代入ではない）。
+# $ で始まる値（別の変数やコマンドの結果）と空の値は除く。コメントアウトした代入も数える（# を区切りとして扱う）
+has_secret_assignment() {
+  printf '%s\n' "$1" | awk '
+    function secret_name(n) {
+      n = toupper(n)
+      return n ~ /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL/ || n ~ /_KEY$/
+    }
+    # state: 0 はコマンドの先頭、1 は export などの引数、2 はコマンドの引数（代入ではない）
+    function word(w,   name, value) {
+      if (w == "" || state == 2) return
+      if (match(w, /^[[:alpha:]_][[:alnum:]_]*\+?=/)) {
+        name = substr(w, 1, RLENGTH - 1); sub(/\+$/, "", name)
+        value = substr(w, RLENGTH + 1); gsub(/["\047]/, "", value)
+        if (value != "" && value !~ /^\$/ && secret_name(name)) found = 1
+      }
+      else if (state == 0 && w ~ /^(export|typeset|declare|local|readonly|integer|float|env)$/) state = 1
+      # then などの後ろは、まだコマンドの先頭。export などのオプションと値の無い変数名の後ろは、まだ引数
+      else if (state == 0 && w ~ /^(then|do|else|!|\{)$/) ;
+      else if (state == 1 && w ~ /^([-+]|[[:alpha:]_][[:alnum:]_]*$)/) ;
+      else state = 2
+    }
+    {
+      state = 0; w = ""; q = ""
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (q != "") {
+          w = w c
+          if (c == q) q = ""
+          else if (c == "\\" && q == "\"") w = w substr($0, ++i, 1)
+        }
+        else if (c == "\"" || c == "\047") { q = c; w = w c }
+        else if (c == "\\") w = w c substr($0, ++i, 1)
+        else if (c ~ /[[:space:]]/) { word(w); w = "" }
+        else if (c ~ /[;&|()]/ || (c == "#" && w == "")) { word(w); w = ""; state = 0 }
+        else w = w c
+      }
+      word(w)
+    }
+    END { exit !found }
+  '
+}
+
 has_secret() {
-  printf '%s\n' "$1" | grep -qiE "$SECRET_ASSIGN_RE" || printf '%s\n' "$1" | grep -qE "$SECRET_VALUE_RE"
+  printf '%s\n' "$1" | grep -qE "$SECRET_VALUE_RE|$SECRET_URL_RE" || has_secret_assignment "$1"
 }
 
 # 1000 文字以上の行か、100 文字以上の空白だけの行があるか
@@ -209,7 +253,7 @@ brewfile_names() {
 
 # only_in <一覧 A> <一覧 B> [base]
 # A にあって B に無いものを A の順に出す。base を付けると、名前の最後の / より後ろで比べる
-# （tap のフォーミュラは、brew leaves では user/tap/name、brew list では name と出る）
+# （tap のフォーミュラは、brew list --full-name では user/tap/name、brew list では name と出る）
 only_in() {
   awk -v base="${3:+1}" '
     function key(s) { if (base) sub(/.*\//, "", s); return s }
@@ -231,18 +275,21 @@ compare_brew() {
 }
 
 collect_brew() {
-  local leaves formulae casks taps
+  local requested formulae casks taps
   if ! command -v brew >/dev/null 2>&1; then
     add_warning "brew が見つからないため、brew / cask / tap を確認していません"
     return
   fi
-  # インストール済みかは、依存として入ったものも含めて判定する
-  if leaves="$(brew_cmd leaves --installed-on-request)" && formulae="$(brew_cmd list --formula)"; then
-    compare_brew brew "$leaves" "$formulae" base
+  # 自分で入れたものは、ほかの formula の依存になっていても出す。インストール済みかは、依存として入ったものも含めて判定する。
+  # --full-name で、サードパーティの tap のものを完全な名前（user/tap/name）にする（Brewfile に短い名前で書くと、
+  # 新しい Mac の brew bundle が失敗するため）。homebrew/core と homebrew/cask のものは短い名前のまま
+  if requested="$(brew_cmd list --formula --installed-on-request --full-name)" &&
+    formulae="$(brew_cmd list --formula)"; then
+    compare_brew brew "$requested" "$formulae" base
   else
-    add_warning "brew leaves か brew list --formula に失敗したため、brew を確認していません"
+    add_warning "brew list --formula に失敗したため、brew を確認していません"
   fi
-  if casks="$(brew_cmd list --cask)"; then
+  if casks="$(brew_cmd list --cask --full-name)"; then
     compare_brew cask "$casks" "$casks" base
   else
     add_warning "brew list --cask に失敗したため、cask を確認していません"
@@ -257,22 +304,29 @@ collect_brew() {
 # --- zshrc / zprofile ---
 
 # zsh_paragraphs <ファイル> [shellenv]
-# dotfiles ブロックを除き、空行で区切った段落を \034 区切りで出す。ブロックは段落の区切りとして扱う。
-# 空行には 100 文字未満の空白だけの行も含める（100 文字以上のものは garbage として段落に残す）。
-# コメントだけの段落と空の段落は出さない。shellenv を付けると、brew shellenv を含む行も除く。
+# dotfiles ブロックを除き、空行で区切った段落を「開始行 \035 直前の空行 \035 本文」の形で、\034 区切りで出す。
+# 直前の空行（1 行ごとに改行付き）は、前の段落とつなぐときに使う。ブロックの手前とファイルの終わりには
+# 空の記録を出す（そこを越えてはつながない）。空行には 100 文字未満の空白だけの行も含める（100 文字以上の
+# ものは garbage として段落に残す）。コメントだけの段落も出す（つないだ段落の途中に入ることがあるため）。
+# shellenv を付けると、brew shellenv を含む行も除く。
 zsh_paragraphs() {
   awk -v drop_shellenv="${2:+1}" '
-    function flush() { if (code) printf "%s\034", para; para = ""; code = 0 }
-    /^# >>> dotfiles/ { in_block = 1 }
-    in_block { if (/^# <<< dotfiles/) in_block = 0; flush(); next }
+    function flush() {
+      if (para == "") return
+      printf "%d\035%s\035%s\034", start, gap, para
+      para = gap = ""
+    }
+    function boundary() { flush(); printf "\034"; gap = "" }
+    /^# >>> dotfiles/ { boundary(); in_block = 1 }
+    in_block { if (/^# <<< dotfiles/) in_block = 0; next }
     drop_shellenv && /brew shellenv/ { next }
     # 空白は 1 バイトの文字なので、length で文字数を数えられる
-    /^[[:space:]]*$/ && length($0) < 100 { flush(); next }
+    /^[[:space:]]*$/ && length($0) < 100 { flush(); gap = gap $0 "\n"; next }
     {
+      if (para == "") start = NR
       para = para (para == "" ? "" : "\n") $0
-      if ($0 !~ /^[[:space:]]*(#|$)/) code = 1
     }
-    END { flush() }
+    END { boundary() }
   ' "$1"
 }
 
@@ -281,49 +335,105 @@ has_unclosed_block() {
   awk '/^# >>> dotfiles/ { open = 1 } /^# <<< dotfiles/ { open = 0 } END { exit !open }' "$1"
 }
 
-# 段落の最初のコメントでない行（前後の空白を除く）
-first_code_line() {
+# 段落がそれだけで構文として完結しているか（zsh -n が通るか）。zsh の設定ファイルは読まない
+zsh_complete() { printf '%s\n' "$1" | zsh -f -n >/dev/null 2>&1; }
+
+# 段落のコメントでない行を、前後の空白を除いて " ⏎ " でつなぐ（zshrc / zprofile の id）
+paragraph_key() {
   printf '%s\n' "$1" | awk '
-    !/^[[:space:]]*(#|$)/ { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print; exit }
+    /^[[:space:]]*(#|$)/ { next }
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); printf "%s%s", (n++ ? " ⏎ " : ""), $0 }
   '
 }
 
+# zsh_item <種類> <段落>: 段落を 1 項目として出す。コメントだけの段落は出さない。
+# secret が立つものは、秘密情報を除外リストに書き写さないよう、id を sha256:<SHA-256> にする
+zsh_item() {
+  local key flags
+  key="$(paragraph_key "$2")"
+  [ -n "$key" ] || return 0
+  flags="$(content_flags "$2")"
+  in_dotfiles "$2" && flags="$flags,in-dotfiles"
+  case "$flags," in
+    *,secret,*) key="sha256:$(printf '%s' "$key" | shasum -a 256 | cut -d ' ' -f 1)" ;;
+  esac
+  emit_item "$1" "$key" local "$flags" "$2"
+}
+
 # collect_zsh <種類> <ファイル> [shellenv]
+# 段落は、zsh -n が通るまで次の段落とつなぐ（if や関数の中の空行で、fi や } だけの断片ができないように）
 collect_zsh() {
-  local kind="$1" file="$2" para flags
+  local kind="$1" file="$2" check=1 rec line gap para text="" start=""
   [ -f "$file" ] || return 0
   if has_unclosed_block "$file"; then
     add_warning "~/.$kind の dotfiles ブロックが閉じていないため、ブロックの開始行より後ろを確認していません"
   fi
-  while IFS= read -r -d $'\034' para; do
-    flags="$(content_flags "$para")"
-    in_dotfiles "$para" && flags="$flags,in-dotfiles"
-    emit_item "$kind" "$(first_code_line "$para")" local "$flags" "$para"
+  if ! command -v zsh >/dev/null 2>&1; then
+    check=0
+    add_warning "zsh が見つからないため、~/.$kind の段落が構文として完結しているかを確かめていません（if や関数の中の空行で、項目が途中で分かれていることがあります）"
+  fi
+  while IFS= read -r -d $'\034' rec; do
+    # ブロックの手前かファイルの終わり。つないでいる途中なら、そこまでを 1 項目にする
+    if [ -z "$rec" ]; then
+      if [ -n "$text" ]; then
+        add_warning "~/.$kind の $start 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも zsh -n が通らないため、そこまでを 1 項目にしています"
+        zsh_item "$kind" "$text"
+        text=""
+      fi
+      continue
+    fi
+    line="${rec%%$'\035'*}"
+    rec="${rec#*$'\035'}"
+    gap="${rec%%$'\035'*}"
+    para="${rec#*$'\035'}"
+    if [ -z "$text" ]; then
+      text="$para"
+      start="$line"
+    else
+      text="$text"$'\n'"$gap$para"
+    fi
+    if [ "$check" -eq 0 ] || zsh_complete "$text"; then
+      zsh_item "$kind" "$text"
+      text=""
+    fi
   done < <(zsh_paragraphs "$file" "$3")
 }
 
 # --- lib ---
 
 # 標準入力の plist を「キーのパス<TAB>値」の行にする。値は 1 行にし、文字列は "" で囲む。
-# キーのパスは dict のキーを / で、array の添字を [n] でつなぐ（例: New Bookmarks[0]/Name）
+# キーのパスは dict のキーを / で、array の添字を [n] でつなぐ（例: New Bookmarks[0]/Name）。
+# array の要素が Guid キーを持つ dict なら、添字の代わりに [Guid=<値>] で識別する（要素の削除や並べ替えで、
+# 後ろの要素がすべて変わったように見えないように）。同じ array の中で Guid が重なる要素は添字のままにする。
+# 1 回目に Guid を集め、2 回目にパスと値を出すため、読んだ XML を 2 回渡す
 plist_lines() {
   local xml
   xml="$(plutil -convert xml1 -o - - 2>/dev/null)" || return 1
-  printf '%s\n' "$xml" | awk '
+  awk '
     BEGIN { RS = "<" }
+    FNR == 1 { pass++; depth = 0 }
     function unescape(s) {
       gsub(/&lt;/, "<", s); gsub(/&gt;/, ">", s); gsub(/&quot;/, "\"", s); gsub(/&apos;/, "\047", s)
       gsub(/&amp;/, "\\&", s)
       return s
     }
-    # 値が始まったときに、その値のキーのパスを返す
-    function child() {
-      if (depth == 0) return ""
-      count[depth]++
-      if (type[depth] == "array") return path[depth] "[" (count[depth] - 1) "]"
-      return path[depth] == "" ? key : path[depth] "/" key
+    # 値が始まったときに、その値のキーのパスを、添字で表したもの（at）と出力用（shown）に入れる
+    function child(   i) {
+      if (depth == 0) { at = shown = ""; return }
+      i = count[depth]++
+      if (type[depth] == "dict") {
+        at = at_path[depth] == "" ? key : at_path[depth] "/" key
+        shown = shown_path[depth] == "" ? key : shown_path[depth] "/" key
+        return
+      }
+      at = at_path[depth] "[" i "]"
+      if ((at in guid) && guids[at_path[depth], guid[at]] == 1) shown = shown_path[depth] "[Guid=" guid[at] "]"
+      else shown = shown_path[depth] "[" i "]"
     }
-    function emit(p, v) { gsub(/\t/, "\\t", v); gsub(/\n/, "\\n", v); print p "\t" v }
+    function emit(p, v) {
+      if (pass == 1) return
+      gsub(/\t/, "\\t", v); gsub(/\n/, "\\n", v); print p "\t" v
+    }
     {
       i = index($0, ">")
       if (i == 0) next
@@ -333,54 +443,73 @@ plist_lines() {
     }
     tag == "key" { key = unescape(text); next }
     tag == "dict" || tag == "array" {
-      p = child()
+      child()
       depth++
-      type[depth] = tag; path[depth] = p; count[depth] = 0
+      type[depth] = tag; at_path[depth] = at; shown_path[depth] = shown; count[depth] = 0
       next
     }
     # 空の dict と array も値として出す（追加と削除がわかるように）
     tag == "/dict" || tag == "/array" {
-      if (count[depth] == 0) emit(path[depth], type[depth] == "dict" ? "{}" : "[]")
+      if (count[depth] == 0) emit(shown_path[depth], type[depth] == "dict" ? "{}" : "[]")
       depth--
       next
     }
-    tag == "dict/" { emit(child(), "{}"); next }
-    tag == "array/" { emit(child(), "[]"); next }
-    tag == "string" { emit(child(), "\"" unescape(text) "\""); next }
-    tag == "string/" { emit(child(), "\"\""); next }
-    tag == "data" { gsub(/[[:space:]]/, "", text); emit(child(), "data:" text); next }
-    tag == "true/" || tag == "false/" { emit(child(), substr(tag, 1, length(tag) - 1)); next }
-    tag == "integer" || tag == "real" || tag == "date" { gsub(/[[:space:]]/, "", text); emit(child(), text) }
-  '
+    # array の要素の dict にある Guid を覚え、同じ array の中で重なる数を数える
+    pass == 1 && tag == "string" && key == "Guid" && depth >= 2 && type[depth] == "dict" && type[depth - 1] == "array" {
+      guid[at_path[depth]] = unescape(text)
+      guids[at_path[depth - 1], unescape(text)]++
+    }
+    tag == "dict/" { child(); emit(shown, "{}"); next }
+    tag == "array/" { child(); emit(shown, "[]"); next }
+    tag == "string" { child(); emit(shown, "\"" unescape(text) "\""); next }
+    tag == "string/" { child(); emit(shown, "\"\""); next }
+    tag == "data" { gsub(/[[:space:]]/, "", text); child(); emit(shown, "data:" text); next }
+    tag == "true/" || tag == "false/" { child(); emit(shown, substr(tag, 1, length(tag) - 1)); next }
+    tag == "integer" || tag == "real" || tag == "date" { gsub(/[[:space:]]/, "", text); child(); emit(shown, text) }
+  ' <(printf '%s\n' "$xml") <(printf '%s\n' "$xml")
 }
 
-# plist_summary <パス> [flags]
-# HEAD と作業ツリーの plist を比べ、変わったキーのパスと前後の値を出す（長い値は省略する）。
-# flags を付けると、フラグの判定に使う変更後の値（data を除く）を出す。
-# どちらかを plist として読めなければ偽。
-plist_summary() {
+# plist_changes <パス>
+# HEAD と作業ツリーの plist を 1 回ずつ読んで比べ、変わったキーを「パス<TAB>前の値<TAB>後の値」の行で出す
+# （値が無いほうは空）。どちらかを plist として読めなければ偽。
+plist_changes() {
   local before after
   [ -f "$REPO_ROOT/$1" ] || return 1
   before="$(repo_git show "HEAD:$1" 2>/dev/null | plist_lines)" || return 1
   after="$(plist_lines <"$REPO_ROOT/$1")" || return 1
-  awk -F '\t' -v mode="$2" -v max="$MAX_VALUE_CHARS" "$AWK_UTF8"'
-    function short(v) { return nchars(v) > max ? truncate(v, max) "...(全 " nchars(v) " 文字)" : v }
-    # 値が無いほうは空で渡す
-    function show(p, b, a) {
-      if (mode == "flags") {
-        if (a != "" && a !~ /^data:/) print p ": " a
-        return
-      }
-      print (p == "" ? "(ルート)" : p) ": " (b == "" ? "(なし)" : short(b)) " -> " (a == "" ? "(なし)" : short(a))
-    }
+  awk -F '\t' '
     FILENAME == ARGV[1] { before[$1] = $2; order[++n] = $1; next }
     {
       seen[$1] = 1
-      if (!($1 in before)) show($1, "", $2)
-      else if (before[$1] != $2) show($1, before[$1], $2)
+      if (!($1 in before)) print $1 "\t\t" $2
+      else if (before[$1] != $2) print $1 "\t" before[$1] "\t" $2
     }
-    END { for (i = 1; i <= n; i++) if (!(order[i] in seen)) show(order[i], before[order[i]], "") }
+    END { for (i = 1; i <= n; i++) if (!(order[i] in seen)) print order[i] "\t" before[order[i]] "\t" }
   ' <(printf '%s\n' "$before") <(printf '%s\n' "$after")
+}
+
+# 標準入力の plist の変更（plist_changes の形）を、キーのパスと前後の値の行にする（長い値は省略する）
+plist_summary() {
+  awk -F '\t' -v max="$MAX_VALUE_CHARS" "$AWK_UTF8"'
+    function short(v) { return nchars(v) > max ? truncate(v, max) "...(全 " nchars(v) " 文字)" : v }
+    {
+      print ($1 == "" ? "(ルート)" : $1) ": " ($2 == "" ? "(なし)" : short($2)) " -> " ($3 == "" ? "(なし)" : short($3))
+    }
+  '
+}
+
+# 標準入力の plist の変更（plist_changes の形）から、フラグの判定に使う変更後の値を出す。
+# data は除く。文字列は "" を外し、\n と \t を改行とタブに戻す
+plist_added_values() {
+  awk -F '\t' '
+    $3 == "" || $3 ~ /^data:/ { next }
+    {
+      v = $3
+      if (v ~ /^".*"$/) v = substr(v, 2, length(v) - 2)
+      gsub(/\\n/, "\n", v); gsub(/\\t/, "\t", v)
+      print v
+    }
+  '
 }
 
 # git diff のうち、足された行だけを出す
@@ -390,7 +519,7 @@ added_lines() {
 
 # lib_item <"XY パス">: lib/ の変更 1 件を要約して出す。フラグは足された内容で判定する
 lib_item() {
-  local status="${1:0:2}" path="${1:3}" file body flag_text="" diff summary
+  local status="${1:0:2}" path="${1:3}" file body flag_text="" diff changes
   file="$REPO_ROOT/$path"
   if [ "$status" = "??" ]; then
     body="(未追跡のファイル)"
@@ -404,13 +533,14 @@ lib_item() {
       body="$body"$'\n'"$(head_lines <"$file")"
       flag_text="$(cat "$file")"
     fi
-  elif [ "${path%.plist}" != "$path" ] && summary="$(plist_summary "$path")"; then
-    if [ -n "$summary" ]; then
-      body="$(printf '%s\n' "$summary" | head_lines)"
+  elif [ "${path%.plist}" != "$path" ] && changes="$(plist_changes "$path")"; then
+    # 本文とフラグは、plist を 1 回だけ読んだ結果から作る（間に iTerm2 が保存しても食い違わないように）
+    if [ -n "$changes" ]; then
+      body="$(printf '%s\n' "$changes" | plist_summary | head_lines)"
     else
       body="(キーと値は HEAD と同じです。書式だけが変わっています)"
     fi
-    flag_text="$(plist_summary "$path" flags)"
+    flag_text="$(printf '%s\n' "$changes" | plist_added_values)"
   else
     # plist 以外と、plist として読めないもの（削除や新規の追加）は git diff で出す
     diff="$(repo_git diff --no-color --no-ext-diff HEAD -- "$path")"
