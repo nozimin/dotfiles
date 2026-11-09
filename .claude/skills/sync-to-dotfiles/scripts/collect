@@ -31,6 +31,11 @@ WARNINGS=()
 # dotfiles 側（HEAD の lib/Brewfile と lib/zshrc）の内容
 HEAD_BREWFILE=""
 HEAD_ZSHRC=""
+# HEAD の lib/zshrc のコメントでない行を、前後の空白を除いて改行でつなぎ、前後にも改行を付けたもの（in_dotfiles で使う）
+HEAD_ZSHRC_LINES=""
+# content_flags の結果（フラグのカンマ区切りと、秘密と判定した値を *** に置き換えた内容）
+FLAGS=""
+MASKED=""
 
 # UTF-8 の文字数を数える awk の関数（LC_ALL=C で、続きのバイト 0x80-0xBF を数えない）
 AWK_UTF8='
@@ -153,9 +158,9 @@ has_missing_path() {
   return 1
 }
 
-# scan_secrets <モード>: 標準入力から秘密情報（§6 の secret の条件）を探す。
-# check は、見つかれば終了コード 0。text、diff（git diff。差分の行は先頭の 1 文字を除いて調べる）、
-# plist（plist_changes の形。文字列の値を調べる）は、秘密と判定した値を *** に置き換えて出す
+# scan_secrets <モード>: 標準入力から秘密情報（§6 の secret の条件）を探し、秘密と判定した値を *** に置き換えて出す。
+# モードは text、diff（git diff。差分の行は先頭の 1 文字を除いて調べる）、plist（plist_changes の形。文字列の値を
+# 調べる）。text は、秘密情報が見つかれば終了コード 0
 scan_secrets() {
   awk -v mode="$1" '
     function secret_name(n) {
@@ -323,8 +328,7 @@ scan_secrets() {
       for (i = 1; i <= n; i++) { scan(parts[i]); out = out (i > 1 ? "\\n" : "") masked(parts[i]) }
       return "\"" out "\""
     }
-    mode == "check" { if (scan($0)) { found = 1; exit } next }
-    mode == "text" { scan($0); print masked($0); next }
+    mode == "text" { if (scan($0)) found = 1; print masked($0); next }
     # 差分の見出し（最初の @@ より前）はそのまま出す
     mode == "diff" {
       if (/^@@/) hunk = 1
@@ -334,11 +338,9 @@ scan_secrets() {
       next
     }
     mode == "plist" { split($0, f, "\t"); print f[1] "\t" masked_value(f[2]) "\t" masked_value(f[3]) }
-    END { if (mode == "check") exit !found }
+    END { if (mode == "text") exit !found }
   '
 }
-
-has_secret() { printf '%s\n' "$1" | scan_secrets check; }
 
 # mask_secrets <モード> <内容>: 秘密と判定した値を *** に置き換える（モードは scan_secrets と同じ）
 mask_secrets() { printf '%s\n' "$2" | scan_secrets "$1"; }
@@ -351,29 +353,38 @@ has_garbage() {
   '
 }
 
-# 段落のコメントでない行が、すべて HEAD の lib/zshrc にあるか（前後の空白を除いて比べる）。
-# 作業ツリーと比べると、未コミットの変更にしかない行も dotfiles にあることになり、その変更を破棄したときに
-# 設定がどこにも残らなくなる
-in_dotfiles() {
-  [ -n "$HEAD_ZSHRC" ] || return 1
-  printf '%s\n' "$1" | ZSHRC="$HEAD_ZSHRC" awk '
-    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-    BEGIN { n = split(ENVIRON["ZSHRC"], lines, "\n"); for (i = 1; i <= n; i++) have[trim(lines[i])] = 1 }
-    { line = trim($0) }
-    line ~ /^(#|$)/ { next }
-    !(line in have) { missing = 1 }
-    END { exit missing }
+# 標準入力のコメントでない行を、前後の空白を除いて 1 行ずつ出す
+noncomment_lines() {
+  awk '
+    /^[[:space:]]*(#|$)/ { next }
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print }
   '
 }
 
-# content_flags <内容>: 内容だけで決まるフラグをカンマ区切りで出す
+# in_dotfiles <段落のコメントでない行（noncomment_lines の形）>: その行が、すべて HEAD の lib/zshrc にあるか。
+# 作業ツリーと比べると、未コミットの変更にしかない行も dotfiles にあることになり、その変更を破棄したときに
+# 設定がどこにも残らなくなる
+in_dotfiles() {
+  local line
+  [ -n "$HEAD_ZSHRC" ] || return 1
+  while IFS= read -r line; do
+    [[ "$HEAD_ZSHRC_LINES" == *$'\n'"$line"$'\n'* ]] || return 1
+  done <<<"$1"
+}
+
+# content_flags <内容>: 内容だけで決まるフラグを FLAGS にカンマ区切りで入れる。秘密情報は 1 回のスキャンで
+# 判定と置き換えを行い、秘密と判定した値を *** に置き換えた内容を MASKED に入れる
 content_flags() {
-  local flags=""
-  has_home_path "$1" && flags="$flags,home-path"
-  has_missing_path "$1" && flags="$flags,missing-path"
-  has_secret "$1" && flags="$flags,secret"
-  has_garbage "$1" && flags="$flags,garbage"
-  printf '%s' "$flags"
+  local out
+  FLAGS=""
+  has_home_path "$1" && FLAGS="$FLAGS,home-path"
+  has_missing_path "$1" && FLAGS="$FLAGS,missing-path"
+  # $( ) が末尾の改行を落とさないよう、終了コード（秘密情報があれば 0）を後ろに付けて受け取る
+  out="$(printf '%s\n' "$1" | scan_secrets text; echo "/$?")"
+  [ "${out##*/}" = 0 ] && FLAGS="$FLAGS,secret"
+  out="${out%/*}"
+  MASKED="${out%$'\n'}"
+  has_garbage "$1" && FLAGS="$FLAGS,garbage"
 }
 
 # --- repo ---
@@ -546,26 +557,21 @@ control_only() {
   '
 }
 
-# 段落のコメントでない行を、前後の空白を除いて " ⏎ " でつなぐ（zshrc / zprofile の id）
-paragraph_key() {
-  printf '%s\n' "$1" | awk '
-    /^[[:space:]]*(#|$)/ { next }
-    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); printf "%s%s", (n++ ? " ⏎ " : ""), $0 }
-  '
-}
-
 # zsh_item <種類> <行の範囲> <段落>: 段落を 1 項目として出す。コメントだけの段落は出さない。
+# id は、段落のコメントでない行を前後の空白を除いて " ⏎ " でつないだもの。
 # secret が立つものは、秘密情報を除外リストに書き写さないよう id を sha256:<SHA-256> にし、
 # 本文の秘密と判定した値を *** に置き換える（id とフラグは置き換える前の内容で決める）
 zsh_item() {
-  local key flags body="$3"
-  key="$(paragraph_key "$3")"
-  [ -n "$key" ] || return 0
-  flags="$(content_flags "$3")"
-  in_dotfiles "$3" && flags="$flags,in-dotfiles"
+  local lines key flags body="$3"
+  lines="$(printf '%s\n' "$3" | noncomment_lines)"
+  [ -n "$lines" ] || return 0
+  key="${lines//$'\n'/ ⏎ }"
+  content_flags "$3"
+  flags="$FLAGS"
+  in_dotfiles "$lines" && flags="$flags,in-dotfiles"
   if has_flag "$flags" secret; then
     key="sha256:$(printf '%s' "$key" | shasum -a 256 | cut -d ' ' -f 1)"
-    body="$(mask_secrets text "$3")"
+    body="$MASKED"
   fi
   emit_item "$1" "$key" local "$flags" "$body" "$2"
 }
@@ -777,14 +783,18 @@ lib_item() {
     elif ! grep -qI '' "$file"; then
       body="$body"$'\n'"(バイナリファイル)"
     else
-      flags="$(content_flags "$(cat "$file")")"
-      content="$(head_lines <"$file")"
-      has_flag "$flags" secret && content="$(mask_secrets text "$content")"
-      body="$body"$'\n'"$content"
+      # 1 回だけ読む。末尾の空行も残す（head_lines が数える行数を変えないため）
+      content="$(cat "$file"; echo /)"
+      content="${content%/}"
+      content_flags "${content%$'\n'}"
+      flags="$FLAGS"
+      has_flag "$flags" secret && content="$MASKED"$'\n'
+      body="$body"$'\n'"$(printf '%s' "$content" | head_lines)"
     fi
   elif [ "${path%.plist}" != "$path" ] && changes="$(plist_changes "$path")"; then
     # 本文とフラグは、plist を 1 回だけ読んだ結果から作る（間に iTerm2 が保存しても食い違わないように）
-    flags="$(content_flags "$(printf '%s\n' "$changes" | plist_added_values)")"
+    content_flags "$(printf '%s\n' "$changes" | plist_added_values)"
+    flags="$FLAGS"
     if [ -z "$changes" ]; then
       body="(キーと値は HEAD と同じです。書式だけが変わっています)"
     else
@@ -794,7 +804,8 @@ lib_item() {
   else
     # plist 以外と、plist として読めないもの（削除や新規の追加）は git diff で出す
     diff="$(repo_git diff --no-color --no-ext-diff HEAD -- "$path")"
-    flags="$(content_flags "$(printf '%s\n' "$diff" | added_lines)")"
+    content_flags "$(printf '%s\n' "$diff" | added_lines)"
+    flags="$FLAGS"
     body="$(printf '%s\n' "$diff" | head_lines)"
     has_flag "$flags" secret && body="$(mask_secrets diff "$body")"
     [ -n "$diff" ] || body="(HEAD との差分はありません)"
@@ -837,6 +848,7 @@ fi
 # dotfiles 側は HEAD の内容と比べる（作業ツリーの未コミットの変更は lib の項目として別に出る）
 HEAD_BREWFILE="$(repo_git show HEAD:lib/Brewfile 2>/dev/null)"
 HEAD_ZSHRC="$(repo_git show HEAD:lib/zshrc 2>/dev/null)"
+HEAD_ZSHRC_LINES=$'\n'"$(printf '%s\n' "$HEAD_ZSHRC" | noncomment_lines)"$'\n'
 
 read_ignore_list
 read_status
