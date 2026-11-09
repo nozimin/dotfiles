@@ -30,7 +30,7 @@ allowed-tools:
 - **指摘**: 対象 1 つと脆弱性 1 つの組。同一性は key `<kind>:<name>:<ID>` で判定する。ID は次の順に決める。
   - `osv` の項目は OSV の `id`（GHSA など。CVE は後から `aliases` に増えることがあるため）。
   - AI が見つけたものは CVE。無ければベンダーのアドバイザリ ID、それも無ければ `fix:<修正版>`。
-  - EOL は `eol:<サイクルか名前>`。VS Code 拡張の削除は `removed:<拡張 ID>`。
+  - EOL は `eol:<サイクルか名前>`（例: `eol:3.1`。後継アプリに置き換わった旧版はインストール済みの版で `eol:14.5`）。VS Code 拡張の削除は `removed:<拡張 ID>`。
   - `ids` には ID と別名（`aliases`、JVNDB の ID など）をすべて入れる。同じ脆弱性をまとめるのは同じ対象の中だけ（Ruby 本体と gem の zlib が同じ CVE でも別の指摘）。
 - **セキュリティ修正**: ベンダーがセキュリティの修正と明記しているもの、または CVE かアドバイザリ ID が付いているもの。境界外書き込みの修正とだけ書かれたものなどは、参考の補足に書く。
 - **参考**: 新しいバージョンはあるが、セキュリティ修正が見つからなかった対象。
@@ -54,7 +54,7 @@ jq -r '.[] | [.layer, .source, .status, .count, (.items | length), (.evidence.re
 ```
 
 - 終了コードが 0 でないか、保存先のファイルが JSON の配列でなければ、エラーの内容をチャットに出して終える。
-- エンベロープは `{source, layer, status, count, fetched_at, evidence, notes, items}`。`count` はそのソースで読み取った件数、`evidence` は「該当なし」の根拠（読んだ URL、件数、層1の取得できた期間 `period` など）、`notes` は補足。インベントリの `source` は kind 名で、層2の `vscode` と同じ名前になるので、`layer` と `source` の組で区別する。
+- エンベロープは `{source, layer, status, count, fetched_at, evidence, notes, items}`。`count` はそのソースで読み取った件数、`evidence` は「該当なし」の根拠（読んだ URL、件数、層1の取得できた期間 `period`（`from` / `to`）と最新の日付 `newest` など）、`notes` は補足。インベントリの `source` は kind 名で、層2の `vscode` と同じ名前になるので、`layer` と `source` の組で区別する。
 - `items` の形（`review` は判定できない項目だけが理由の文字列を持ち、他は `null`）:
 
   | layer / source | 項目 |
@@ -70,7 +70,7 @@ jq -r '.[] | [.layer, .source, .status, .count, (.items | length), (.evidence.re
   `matched` は、その候補と名前が一致したインベントリの `"<kind> <name>"` の一覧。
 - 層1の JVN iPedia、JVN、JPCERT/CC は、RSS が持っている範囲（iPedia は 1〜2 日分、JVN は 10 日前後）だけを照合している。範囲の外の脆弱性も、インストール済みのものは層2の全件照合で拾う。
 
-完了条件: すべてのエンベロープを、状態（`ok` → OK、`warn` → 要確認、`error` → 取得失敗）付きでソース健全性の表（「出力」の節）の下書きに移した。層1の行には `evidence.period` の期間と最新の日付を書いた。
+完了条件: すべてのエンベロープを、状態（`ok` → OK、`warn` → 要確認、`error` → 取得失敗）付きでソース健全性の表（「出力」の節）の下書きに移した。層1の行には `evidence.period` の期間と `evidence.newest` の最新の日付を書いた。
 
 ### 2. 層2の脆弱性を確定する
 
@@ -99,11 +99,16 @@ jq -c '.[] | select(.layer == "layer2" and (.source | IN("brew-api", "cask-api",
   - NVD の画面（`nvd.nist.gov/vuln/detail/...`）は WebFetch では中身が取れない。CVE の内容、影響範囲、スコアは `https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<CVE>` か `https://cveawg.mitre.org/api/cve/<CVE>` で読む。
   - Chrome Releases のブログも WebFetch では本文が取れない。`https://chromereleases.googleblog.com/feeds/posts/default/-/Stable%20updates?alt=json&max-results=6` で読む。
 - `macos` は `softwareupdate --list` に更新が出ているものが `outdated: true` になる。Apple のセキュリティアップデートの一覧（<https://support.apple.com/ja-jp/100100>）で、その更新の修正内容を調べる。
-- Ruby 本体（`ruby`）は、インストール済みから最新版までの各リリースノートに書かれた CVE を指摘にする（同梱の gem の修正も含む）。
-- `review` の付いた項目（`unmapped`、バージョン不明、比較不能）は、ベンダーのページで最新版を調べる。
+- ランタイム本体（`ruby` など）は、インストール済みから最新版までの各リリースノートに書かれた CVE を指摘にする（同梱の gem の修正も含む）。
+- `review` の付いた項目（`unmapped`、バージョン不明、比較不能）は、ベンダーのページで最新版を調べる。インベントリと層2の両方に出る対象（バージョン不明の Steam など）は 1 つとして扱う。全エンベロープの `review` の項目は次で一覧にできる。
+
+  ```sh
+  jq -r '.[] | .layer as $l | .source as $s | .items[]? | select(.review? != null) | [$l, $s, (.name // .id), .review] | @tsv' <保存先>
+  ```
+
   - 読めたら、その URL とバージョンを根拠に AI 確認とし、判定は他の項目と同じに行う（新しければ `outdated: true` と同じに調べる）。
-  - 後継のアプリに置き換わって更新が止まっている（例: 旧版の Keynote 14.5）と分かったものは EOL として扱う。
-  - どうしても判定できないものだけを個別に要確認とし、理由と調べた URL を残す。
+  - 後継のアプリに置き換わって更新が止まっている（例: 旧版の Keynote 14.5）と分かったものは EOL として扱い、AI 確認に入れる。
+  - どうしても判定できないものだけを個別に要確認とし、理由と調べた URL を残す。ベンダーのページが読めず（WebFetch で中身が空など）、第三者のサイトにしか版が無いものもここに入れ、その値を理由に添える。
 - EOL（`eol` が実行日以前の日付、または更新が止まったもの）は指摘にする。修正版はサポート中のサイクルの最新版（後継アプリならその名前）。
 - 更新コマンドは項目の `update_command` を使う。
 
@@ -119,7 +124,7 @@ KEV、JVN iPedia、JVN の候補は、拾い過ぎ側に倒した名前の一致
 jq -r '.[] | select(.layer == "layer1" and .source == "kev") | [.items[] | .matched[] as $m | {m: $m, product: "\(.vendor) \(.product)", date_added}] | group_by(.m)[] | "\(length)件\t\(.[0].m)\t最新 \([.[].date_added] | max)\t\([.[].product] | unique | join(" / "))"' <保存先>
 ```
 
-1. **誤一致を落とす**: 候補の製品（KEV の `vendor` と `product`、JVN の `title` と `cpe`）が、その対象そのものか、対象に同梱された部品でなければ落とす。例: LINE と Jenkins Command Line Interface、`google` の一致による omniauth-google-oauth2 と Chromium、`rails` の一致による rubocop-rails と Ruby on Rails。影響を受けるのが macOS 以外の版だけ（「Windows 上の」「Android 版」「iOS 版」、Windows のインストーラだけなど）と書かれた候補も落とす。
+1. **誤一致を落とす**: 候補の製品（KEV の `vendor` と `product`、JVN の `title` と `cpe`）が、その対象そのものか、対象に同梱された部品でなければ落とす。例: LINE と Jenkins Command Line Interface、`google` の一致による omniauth-google-oauth2 と Chromium、`rails` の一致による rubocop-rails と Ruby on Rails、言語の連携用のパッケージ（gem の openssl）とライブラリ本体（OpenSSL）。影響を受けるのが macOS 以外の版だけ（「Windows 上の」「Android 版」「iOS 版」、Windows のインストーラだけなど）と書かれた候補も落とす。
 2. **絞り込む**: KEV は修正版を持たないので、対象ごとに次のように絞ってから調べる。対象の候補を新しい順に並べるには次のようにする。
 
    ```sh
