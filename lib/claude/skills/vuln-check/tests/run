@@ -58,6 +58,7 @@ BASE_ENV=(
   VULNCHECK_JPCERT_URL="file://$FIXTURES/jpcert.rdf"
   VULNCHECK_VSCODE_REMOVED_URL="file://$FIXTURES/RemovedPackages.md"
   VULNCHECK_NOW=2026-11-10T12:00:00+09:00
+  VULNCHECK_APP_DIRS="$TMP/apps:$TMP/home/Applications"
   FAKE_SOFTWAREUPDATE=none
 )
 
@@ -154,6 +155,35 @@ EOF
 # 偽の <名前> を PATH の先頭に置く vulncheck の引数（PATH=…）を出す
 with_fake() {
   echo "PATH=$TMP/bin-$1:$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
+# make_app <.app のパス> [キー=値...]
+# Info.plist に文字列のキーだけを持つ偽のアプリを作る
+make_app() {
+  local app="$1" pair
+  shift
+  mkdir -p "$app/Contents"
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0">' '<dict>'
+    for pair in "$@"; do
+      printf '<key>%s</key><string>%s</string>\n' "${pair%%=*}" "${pair#*=}"
+    done
+    printf '%s\n' '</dict>' '</plist>'
+  } >"$app/Contents/Info.plist"
+}
+
+# 偽のアプリのディレクトリ（VULNCHECK_APP_DIRS）。6 の inventory で使う。数えるのは 5 つ:
+# 直下、3 階層目のサブフォルダ、シンボリックリンク、CFBundleShortVersionString が無いもの（review）、2 つ目の場所（~/Applications）。
+# 4 階層目と .app の中の .app は数えない
+make_fake_apps() {
+  make_app "$TMP/apps/Example.app" CFBundleIdentifier=com.example.app CFBundleShortVersionString=1.0
+  make_app "$TMP/apps/Example.app/Contents/Helpers/Example Helper.app" CFBundleShortVersionString=1.0
+  make_app "$TMP/apps/Vendor/Product/Deep App.app" CFBundleShortVersionString=2.1
+  make_app "$TMP/apps/Vendor/Product/Extras/Too Deep.app" CFBundleShortVersionString=3.0
+  make_app "$TMP/app-targets/Linked.app" CFBundleShortVersionString=4.0
+  ln -s "$TMP/app-targets/Linked.app" "$TMP/apps/Linked.app"
+  make_app "$TMP/apps/No Short Version.app" CFBundleVersion=6.1
+  make_app "$TMP/home/Applications/User App.app" CFBundleShortVersionString=5.0
 }
 
 # 空のファイル。ベース URL のソース（OSV、formula、endoflife）は読むパスに置く
@@ -260,6 +290,7 @@ freshness() {
 }
 
 make_fake_commands
+make_fake_apps
 make_empty_files
 
 step "1. shellcheck"
@@ -368,7 +399,7 @@ freshness jvn 2026-11-23T14:45:13+09:00 2026-11-23T14:45:14+09:00 2026-11-23T14:
 freshness jpcert 2026-11-19T09:51:59+09:00 2026-11-19T09:52:00+09:00 2026-11-19T09:52:01+09:00 \
   2026-10-26T16:25+09:00 2026-10-29T15:43+09:00 2026-11-05T09:52+09:00 jpcert
 
-step "6. 項目ごとの要確認（フィクスチャと偽の code / npm。ネットワークは使わない）"
+step "6. 項目ごとの要確認（フィクスチャと偽の code / npm / アプリ。ネットワークは使わない）"
 vulncheck latest --inventory "$FIXTURES/inventory-review.json"
 expect "brew-api: homebrew/core 以外の tap（unmapped）→ ok のまま、その項目に review、evidence.review は 1" \
   'envelope("brew-api") | .status == "ok" and .evidence.review == 1
@@ -386,7 +417,7 @@ expect "endoflife: ruby 以外（jruby、unmapped）→ ok のまま、その項
   'envelope("endoflife") | .status == "ok" and .evidence.review == 1
     and (item("jruby").review | test("unmapped")) and item("ruby").review == null'
 
-# inventory はこの Mac の /Applications と sw_vers も読む（読み取りだけ）。確かめるのは偽のコマンドの kind だけ
+# inventory はこの Mac の sw_vers と Safari の Info.plist も読む（読み取りだけ）。確かめるのは偽のコマンドと偽のアプリの kind だけ
 vulncheck inventory
 for source in vscode npm; do
   expect "inventory $source: バージョン不明の項目 → ok のまま、その項目に review、evidence.review は 1" \
@@ -394,6 +425,13 @@ for source in vscode npm; do
       and (.items | map(select(.review != null)) | length == 1 and .[0].version == null and (.[0].review | test("バージョン不明")))' \
     --arg source "$source"
 done
+expect "inventory app: CFBundleShortVersionString が無いアプリ → ok のまま、その項目に review（CFBundleVersion を添える）" \
+  'envelope("app") | .status == "ok" and .evidence.review == 1
+    and (item("No Short Version") | .version == null and (.review | test("CFBundleVersion は 6.1")))'
+expect "inventory app: 探す範囲は各場所の 3 階層まで（サブフォルダ、シンボリックリンク、2 つ目の場所を含み、4 階層目と .app の中は数えない）" \
+  'envelope("app") | .count == 5 and .evidence.apps == 5 and .evidence.depth == 3
+    and ([.items[].name] | sort) == ["Deep App", "Example", "Linked", "No Short Version", "User App"]
+    and item("Deep App").path == ($apps + "/Vendor/Product/Deep App.app")' --arg apps "$TMP/apps"
 
 step "7. silent failure の経路（フィクスチャと偽のコマンド。ネットワークは使わない）"
 # cask API が 0 件 → warn（すべての .app が unmapped になって異常が隠れるため）

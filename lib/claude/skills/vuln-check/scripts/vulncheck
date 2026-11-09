@@ -46,6 +46,9 @@ FETCH_TIMEOUT=60
 PLIST_BUDDY=/usr/libexec/PlistBuddy
 APPS_DIR=/Applications
 VSCODE_APP_CLI="$APPS_DIR/Visual Studio Code.app/Contents/Resources/app/bin/code"
+# app のインベントリを探す場所（: 区切り。VULNCHECK_APP_DIRS で差し替え。§3.3）と、探す深さ（§4）
+APP_DIRS="${VULNCHECK_APP_DIRS:-$APPS_DIR:$HOME/Applications}"
+APP_SEARCH_DEPTH=3
 
 INVENTORY_FILE=""
 NOW_EPOCH=""
@@ -413,10 +416,11 @@ inventory_brew_cask() {
   inventory_result brew-cask ok "$evidence" <<<"$items"
 }
 
-# /Applications/*.app。バージョンは brew の記録ではなく Info.plist から読む。Safari は macos で扱う
+# APP_DIRS（/Applications と ~/Applications）の下の .app。バージョンは brew の記録ではなく Info.plist から読む。Safari は macos で扱う
 inventory_app() {
   local app plist name bundle_id version review origin evidence found=0 status=ok cask_apps='[]' items="$WORK_DIR/app-items.jsonl"
-  local notes=()
+  local dir list="$WORK_DIR/app-paths.txt" err="$WORK_DIR/app-find.err"
+  local notes=() dirs=()
   if has_command brew; then
     if load_brew_installed 2>/dev/null; then
       cask_apps="$(jq -c '[.casks[] | .artifacts[]? | objects | select(has("app"))
@@ -426,8 +430,20 @@ inventory_app() {
       notes+=("brew の記録を読めず、origin の brew-cask を判定できませんでした")
     fi
   fi
+  # 各場所の下を APP_SEARCH_DEPTH 階層まで探す（BOSS/GX-10/… のようなベンダーのフォルダの中も）。.app の中には入らない。
+  # Safari.app のようなシンボリックリンクの .app も拾う。無い場所（~/Applications など）は飛ばす
+  IFS=: read -r -a dirs <<<"$APP_DIRS"
+  : >"$list"
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    [ -d "$dir" ] || continue
+    if ! find "$dir" -mindepth 1 -maxdepth "$APP_SEARCH_DEPTH" -name '*.app' \( -type d -o -type l \) -prune -print 2>"$err" |
+      sort >>"$list"; then
+      status=warn
+      notes+=("$dir の一部を探せませんでした: $(head -n 1 "$err")")
+    fi
+  done
   : >"$items"
-  for app in "$APPS_DIR"/*.app; do
+  while IFS= read -r app; do
     [ -d "$app" ] || continue
     found=$((found + 1))
     plist="$app/Contents/Info.plist"
@@ -460,8 +476,9 @@ inventory_app() {
       --arg review "$review" \
       '{kind: "app", name: $name, version: ($version | select(. != "") // null), origin: $origin,
         bundle_id: ($bundle_id | select(. != "") // null), path: $path, review: ($review | select(. != "") // null)}' >>"$items"
-  done
-  evidence="$(jq -nc --arg dir "$APPS_DIR" --argjson found "$found" '{dir: $dir, apps: $found}')"
+  done <"$list"
+  evidence="$(jq -nc --argjson found "$found" --argjson depth "$APP_SEARCH_DEPTH" '{dirs: $ARGS.positional, depth: $depth, apps: $found}' \
+    --args -- ${dirs[@]+"${dirs[@]}"})"
   jq -s -c . "$items" | inventory_result app "$status" "$evidence" ${notes[@]+"${notes[@]}"}
 }
 
