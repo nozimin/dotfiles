@@ -34,18 +34,19 @@
 | `brew` | `brew list --formula --installed-on-request`（ほかの formula の依存になっていても、自分で入れたものは出す） | `lib/Brewfile` の `brew "..."` |
 | `cask` | `brew list --cask` | `lib/Brewfile` の `cask "..."` |
 | `tap` | `brew tap` | `lib/Brewfile` の `tap "..."` |
-| `zshrc` | `~/.zshrc` の dotfiles ブロックの外 | `lib/zshrc` |
-| `zprofile` | `~/.zprofile` の dotfiles ブロックの外 | `lib/zshrc` |
+| `zshrc` | `~/.zshrc` の dotfiles ブロックの外 | `HEAD` の `lib/zshrc` |
+| `zprofile` | `~/.zprofile` の dotfiles ブロックの外 | `HEAD` の `lib/zshrc` |
 | `lib` | リポジトリの `lib/` 以下の未コミットの変更（未追跡のファイルを含む） | `HEAD` |
 
 - brew コマンドは `HOMEBREW_NO_AUTO_UPDATE=1` で呼ぶ。brew が無ければ `brew` `cask` `tap` を飛ばし、`warn` を出す。
 - 逆向きの差分も出す: Brewfile にあるのにインストールされていないもの。`brew` はインストール済みかを `brew list --formula`（依存として入ったものも含む）で判定する。
-- `brew` と `cask` は名前の最後の `/` より後ろで比べる（tap のフォーミュラは完全な名前と短い名前が混ざるため）。`tap` は名前全体で比べる。
+- `brew` と `cask` は名前の最後の `/` より後ろで比べる（tap のフォーミュラは完全な名前と短い名前が混ざるため）。`tap` は名前全体で比べる。`homebrew/core` と `homebrew/cask` は出さない。Brewfile の完全な名前の行（`brew "user/tap/foo"`）から暗黙に追加される tap は、Brewfile にあるものとして扱う。
+- dotfiles 側（`lib/Brewfile` と `lib/zshrc`）は `HEAD` の内容と比べる（`git show HEAD:<パス>`）。作業ツリーの未コミットの変更は `lib` の項目として別に出る。作業ツリーと比べると、未コミットの変更にしかない行が「dotfiles にある」と判定され、その変更を破棄したときに設定がどこにも残らなくなるため。
 - サードパーティの tap のもの（`homebrew/core` と `homebrew/cask` 以外）は、`body` と `id` に完全な名前（`<user>/<tap>/<名前>`。`brew list --formula --installed-on-request --full-name` / `brew list --cask --full-name`）を出す。Brewfile に短い名前で書くと、新しい Mac の `brew bundle` が失敗するため。
 - dotfiles ブロック: `# >>> dotfiles` で始まる行から `# <<< dotfiles` で始まる行まで（`dotfiles: homebrew` のような名前付きも含む）。閉じていなければ開始行から最後までを除き、`warn` を出す。
-- `zprofile` では `brew shellenv` を含む行も除く（dotfiles ブロック導入前に追記されたもの）。
+- `zprofile` では `brew shellenv` を含む行も除く（dotfiles ブロック導入前に追記されたもの）。その行を除いた残りが `zsh -n` を通らないか、制御構文の行（`if` `then` `else` `fi` `{` `}` など）とコメントだけになる段落は、段落ごと除く（`if ...; then eval "$(brew shellenv)"; fi` から中身のない `if` が出ないため）。
 - `zshrc` と `zprofile` は、空行で区切った「段落」を 1 項目にする。空行には空白だけの行も含めるが、100 文字以上の空白だけの行は段落に残す（§6 の `garbage`）。dotfiles ブロックも段落の区切りになる。コメントだけの段落と空の段落は出さない。
-- 段落がそれだけで構文として完結しない（`zsh -n` が通らない）ときは、通るまで次の段落とつなぐ（`if` や関数の中の空行で、`fi` や `}` だけの断片ができないようにするため）。dotfiles ブロックを越えてはつながない。ファイルの最後か dotfiles ブロックの手前までつないでも通らなければ、そこまでを 1 項目にして `warn` を出す。
+- 段落がそれだけで構文として完結しない（`zsh -n` が通らない）ときは、通るまで次の段落とつなぐ（`if` や関数の中の空行で、`fi` や `}` だけの断片ができないようにするため）。閉じていないヒアドキュメント（`<<EOF` などの終わりの行がまだ無い）も、`zsh -n` が通っても完結していないものとして、終わりの行までつなぐ（`zsh -n` は閉じていないヒアドキュメントを通すため）。dotfiles ブロックを越えてはつながない。ファイルの最後か dotfiles ブロックの手前までつないでも通らなければ、そこまでを 1 項目にして `warn` を出す。
 - VS Code の拡張機能（Brewfile の `vscode` 行）は、VS Code を §9 で取り込むときに collect に追加する。今は扱わない。
 
 ## 5. collect の出力形式
@@ -85,7 +86,8 @@ ignored: 1
   - `id`: 除外リスト（§7）で使う識別子。`<kind>:<識別子>` の形。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落のコメントでない行を前後の空白を除いて ` ⏎ ` でつないだもの（1 行の段落ならその行。段落の中身が変われば別の項目として扱う）、`lib` はリポジトリからの相対パス。`secret` が立つ `zshrc` `zprofile` の項目は、秘密情報を除外リストに書き写さないよう `<kind>:sha256:<上の文字列の SHA-256>` にする（末尾に改行を付けない文字列から求める）。
   - `direction`: `local`（ローカルにだけある）、`dotfiles`（dotfiles にだけある）、`changed`（`lib/` の未コミットの変更）のどれか。
   - `flags`: §6 のフラグを、§6 の表の順にカンマ区切りで。無ければ `-`。
-  - `body:` の後: 本文。各行の先頭に 4 スペースを付ける。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落の全文、`lib` は §5.1 の要約。
+  - `lines`: `zshrc` `zprofile` だけ。段落がファイルの何行目から何行目か（`lines: 12-15`。1 から数える）。skill はこの範囲でローカルの段落を消す（同じ内容の段落が複数あっても取り違えないため）。
+  - `body:` の後: 本文。各行の先頭に 4 スペースを付ける。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落の全文、`lib` は §5.1 の要約。`secret` が立つ項目は、秘密と判定した値を `***` に置き換える（表に載せたときにチャットや transcript に残さないため）。
 - `=== warn`: 確認できなかったこと（1 行 1 件）。無ければブロックを出さない。
 - `=== summary`: `items`（出した項目数）と `ignored`（除外リストで除いた数）。
 - オプション: `--no-fetch`（`git fetch` しない。`behind` と `ahead` はローカルの追跡ブランチで数える）。
@@ -105,10 +107,10 @@ ignored: 1
 | フラグ | 条件 | skill のおすすめ |
 |---|---|---|
 | `home-path` | `$HOME` の絶対パス（`/Users/<ユーザー名>/...`）を含む | 共通化。取り込むときに `$HOME` か `~` に書き換える |
-| `missing-path` | `~/...`、`$HOME/...`、`${HOME}/...`、`/Users/...` のパスで、存在しないものを参照している | ローカル専用 |
+| `missing-path` | `~/...`、`$HOME/...`、`${HOME}/...`、`/Users/...` のパスで、存在しないものを参照している（引用符で囲んだパスと `\ ` でエスケープした空白は、パスの一部として扱う） | ローカル専用 |
 | `secret` | トークンらしい文字列を含む（下の条件） | 共通化を選べない。ローカル専用か保留だけ |
 | `garbage` | 1000 文字以上の行、または 100 文字以上の空白だけの行がある | 取り込むときにその行を消す |
-| `in-dotfiles` | 段落のコメントでない行が、すべて `lib/zshrc` に既にある（前後の空白を除いて比べる） | 共通化（dotfiles にあるので、ローカルから消すだけ） |
+| `in-dotfiles` | 段落のコメントでない行が、すべて `HEAD` の `lib/zshrc` に既にある（前後の空白を除いて比べる） | 共通化（dotfiles にあるので、ローカルから消すだけ） |
 
 フラグを付ける種類: `brew` `cask` `tap` には付けない。`zshrc` `zprofile` には 5 種すべて。`lib` には `in-dotfiles` 以外の 4 種を、足された内容（diff の `+` 行、未追跡のファイル全体、plist の変更後の値）だけで判定する。
 
@@ -116,9 +118,9 @@ ignored: 1
 
 `secret` の条件は次のどれか:
 
-- 変数への代入（`NAME=値`、`export NAME=値` など。`alias` の定義や `[[ ... == ... ]]` の比較は代入ではない）で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）、空の値、パス（`~` か `/` で始まる）、真偽値や数値だけの値（`true` `false` `yes` `no` `0` など）は除く（`SSH_KEY=~/.ssh/id_rsa` や `TOKENIZERS_PARALLELISM=false` で共通化を選べなくならないため）。
-- 設定ファイル形式の `キー: 値`、`キー = 値`、`"キー": "値"` で、キーが上と同じ条件に当たり、値も上と同じ除外に当たらないもの（`lib` の YAML / TOML / JSON のため）。コメントの行（`#` `;` `//` で始まる）、`{` か `[` で始まる値、`""` で囲んだキーに `""` で囲んでいない値が付くもの（JSON の `null` など）は見ない。キー名のハイフン（`api-key`）は条件に当たらない（既知の制限）。plist は変更後の値だけで判定し、キーの名前は見ない。
-- `ghp_` `gho_` `github_pat_` `sk-` `sk_live_` `rk_live_` `xox?-` `AKIA` で始まる値。単語の先頭で、ある程度の長さが続くものだけにする（`disk-` などに誤って反応しないため）。
+- 変数への代入（行の中の `NAME=値` の形の単語。`export` `sudo` `env` の引数、`;` `{` `then` `if` の後なども含む。`alias` の直後の単語と `[[ ... == ... ]]` の比較は代入ではない）で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）、空の値、パス（`~` か `/` で始まる）、真偽値や数値だけの値（`true` `false` `yes` `no` `0` など）は除く（`SSH_KEY=~/.ssh/id_rsa` や `TOKENIZERS_PARALLELISM=false` や `MAX_TOKENS=4096` で共通化を選べなくならないため）。ただし数値だけの値の除外は、名前が `PASSWORD` `PASSWD` `SECRET` を含むときは行わない（`PASSWORD=12345`）。`$` の除外は、単一引用符で囲んだ値（`'$abc123'` は展開されない文字列）には行わない。
+- 設定ファイル形式の `キー: 値`、`キー = 値`、`"キー": "値"` で、キーが上と同じ条件に当たり、値も上と同じ除外に当たらないもの（`lib` の YAML / TOML / JSON のため）。コメントの行（`#` `;` で始まる。`//` で始まる行は `.npmrc` の `//registry.npmjs.org/:_authToken=...` があるのでコメントとみなさない）、`{` か `[` で始まる値、`""` で囲んだキーに `""` で囲んでいない値が付くもの（JSON の `null` など）は見ない。キー名のハイフン（`api-key`）は条件に当たらない（既知の制限）。plist は変更後の値だけで判定し、キーの名前は見ない。
+- `ghp_` `gho_` `github_pat_` `npm_` `glpat-` `AIza` `sk-` `sk_live_` `rk_live_` `xox?-` `AKIA` で始まる値、`Bearer <トークン>`、`_authToken=<値>`、`-----BEGIN ... PRIVATE KEY-----`。単語の先頭で、ある程度の長さが続くものだけにする（`disk-` などに誤って反応しないため）。
 - URL の中の認証情報（`://<ユーザー>:<パスワード>@`。パスワードが `$` で始まるものは除く）。
 
 複数のフラグが立ったときは `secret` > `in-dotfiles` > `missing-path` > `home-path` の順に優先する。`garbage` は、おすすめとは別に「取り込むときにその行を消す」という但し書きとして扱う。
@@ -126,7 +128,7 @@ ignored: 1
 ## 7. 除外リスト
 
 - 場所: `~/.config/dotfiles/ignore`。Mac ごとに持ち、リポジトリには入れない。
-- 形式: 1 行に 1 つ、§5 の `id` をそのまま書く。空行と `#` で始まる行は無視する。
+- 形式: 1 行に 1 つ、§5 の `id` をそのまま書く。空行と `#` で始まる行は無視する。行末の空白と CR は取り除いてから比べる（手で編集したときに一致しなくならないため）。
 - collect は、`id` が完全に一致する項目を出さず、`ignored` に数える。ファイルが無ければ除外なしとして扱う。
 - skill は、ユーザーが「ローカル専用」にした項目の `id` を `${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}` に追記する（ディレクトリが無ければ作る。ファイルの末尾が改行で終わっていなければ、先に改行を足す）。
 
@@ -150,8 +152,8 @@ ignored: 1
    - Brewfile: 既存のセクション（`# CLI`、`# アプリ`、`# フォント`）の適切な場所に足す。合うものが無ければセクションを足す。「dotfiles から削除」は行を消す。
    - 順序: `lib` の「破棄」を最初に行い、その後に Brewfile と zsh の取り込みを行う（後から破棄すると、取り込んだ内容まで消えるため）。
    - 取り込み先のファイル（`lib/Brewfile`、`lib/zshrc`）が `lib` の項目にもなっていて、この回にそのファイルへの取り込みがあるときは、その `lib` の項目を commit か破棄にするか、そのファイルへの取り込みもこの回は保留にするかを選んでもらう（保留の変更が取り込みの commit に混ざるため）。`secret` で commit できない項目なら、破棄か、取り込みの保留のどちらか。表の選択が決まった後に AskUserQuestion で聞き、おすすめは「取り込みも保留」（何も失われないため）。「そのファイルへの取り込み」には、`lib/Brewfile` では「dotfiles から削除」も含め、`lib/zshrc` では `in-dotfiles` の段落（ローカルから消すだけ）は含めない。取り込みを保留にしたら、そのファイルに足す・消す項目と、まとめた段落もこの回は保留にする。
-   - zsh: `lib/zshrc` に段落単位で足す。行単位で間引かない（`fi` や `}` が抜けるため）。同じ設定の段落が複数ある（例: `zshrc` と `zprofile` の `rbenv init`）ときは 1 つにまとめ、どれを残すかを見せる。ツールに依存する行は `command -v <tool>` でガードする（README の約束）。`home-path` は `$HOME` か `~` に書き換え、`garbage` の行は消す。`zprofile` から取り込むものも `lib/zshrc` に入れる（`lib/zprofile` は作らない）。`lib/zshrc` は対話シェルでしか読まれないので、`zsh -l -c` のような非対話のログインシェルでは効かなくなるが、ユーザーの決定としてこの差は受け入れる。
-   - 取り込んだ（または `in-dotfiles` だった）段落は、ローカルの `~/.zshrc` / `~/.zprofile` から消す。消す前に差分を見せて確認し、`<ファイル>.backup-YYYYmmddHHMMSS` に退避する。書き換える前に、書き換え後の内容を `zsh -n` で確かめ、通らなければ書き換えずに流れ全体を止め（残りのファイル、除外リストへの追記、commit、push に進まない）、ユーザーの指示を待つ（リポジトリ側の変更は commit せずに残り、先に済んだファイルの書き換えは退避ごと残る）。`zprofile` の段落は `brew shellenv` の行を除いているのでファイルの中で連続しないことがある。消す範囲の中の `brew shellenv` の行は残す。
+   - zsh: `lib/zshrc` に段落単位で足す。行単位で間引かない（`fi` や `}` が抜けるため）。同じ設定の段落が複数ある（例: `zshrc` と `zprofile` の `rbenv init`）ときは 1 つにまとめ、どれを残すかを見せる。この回に commit する `lib/zshrc` の未コミットの変更に、同じ段落が既にあれば足さない（二重に入るため）。ツールに依存する行は `command -v <tool>` でガードする（README の約束）。`home-path` は `$HOME` か `~` に書き換え、`garbage` の行は消す。`zprofile` から取り込むものも `lib/zshrc` に入れる（`lib/zprofile` は作らない）。`lib/zshrc` は対話シェルでしか読まれないので、`zsh -l -c` のような非対話のログインシェルでは効かなくなるが、ユーザーの決定としてこの差は受け入れる。
+   - 取り込んだ（または `in-dotfiles` だった）段落は、ローカルの `~/.zshrc` / `~/.zprofile` から消す。消す範囲は `lines` で決め、その範囲の内容が `body` と一致することを確かめてから消す（一致しなければ止める。ファイルが変わっているため）。消す前に差分を見せて確認し、`<ファイル>.backup-YYYYmmddHHMMSS` に退避する。書き換える前に、書き換え後の内容を `zsh -n` で確かめ、通らなければ書き換えずに流れ全体を止め（残りのファイル、除外リストへの追記、commit、push に進まない）、ユーザーの指示を待つ（リポジトリ側の変更は commit せずに残り、先に済んだファイルの書き換えは退避ごと残る）。`zprofile` の段落は `brew shellenv` の行を除いているのでファイルの中で連続しないことがある。消す範囲の中の `brew shellenv` の行は残す。
    - `lib` の「破棄」は `git restore --source=HEAD --staged --worktree`（stage した変更も戻すため。未追跡なら削除）。iTerm2 の plist は、iTerm2 が起動中だと終了時に書き戻されることを伝える。
    - 「ローカル専用」は除外リストに追記する。「保留」は何もしない（次回また出る）。
 4. **commit**: commit するかは、3 でリポジトリのファイルを変えたか（取り込み、dotfiles から削除、`lib` の commit）で決める。保留にした `lib` の変更は残るので、`git status` が空かどうかでは決めない。変えたものが無ければ commit を飛ばして 5 に進む。commit は `git commit -- <パス>` でそのエリアのファイルだけにする（ほかに stage されているものを含めないため）。`git diff` を見せて確認してから、エリアごとに分けて `main` に直接 commit する（個人用の dotfiles なのでブランチや PR は作らない）。メッセージは `[feat]` `[fix]` `[del]` + 日本語（例: `[feat] Brewfile に actionlint などを追加`）。
@@ -179,6 +181,11 @@ ignored: 1
 - 新しいツールを追加した後は `cmd/setup` を実行し直す。
 
 「構成」に `.claude/skills/sync-to-dotfiles/` を足す。
+
+## 10.1 既知の制限
+
+- 段落が閉じないまま続くと、つなぐたびに `zsh -n` をかけ直すので、処理時間が段落の数の 2 乗で増える。`~/.zshrc` の大きさでは問題にならない。
+- 設定ファイル形式の `secret` は、キー名のハイフン（`api-key`）に当たらない。
 
 ## 11. 受け入れ条件
 
