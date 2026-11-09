@@ -11,10 +11,11 @@
 #   取得に失敗したら error、空なら warn のエンベロープを出して 1 を返す。呼び出し側は `|| return 0` で抜ける。
 #   URL は下の *_URL を使う（VULNCHECK_*_URL で差し替え、file:// も可）。エンベロープを作らない取得は fetch。
 #   多数の URL を並列に取るときは fetch_many（1 件ごとの結果を出す）。
-# - 層1の RSS は rss_items で取得して xmllint で項目を読み、LAYER1_JQ の rss_summary で取得できた期間と鮮度を見る。
+# - 層1の RSS は fetch_source で取得し、rss_items で xmllint で項目を読み、LAYER1_JQ の rss_summary で取得できた期間と鮮度を見る。
 #   インベントリとの緩い名前一致は MATCH_JQ の token_index と candidate。
 # - run_source <ソース> <層> <関数> [引数...]
 #   関数をサブシェルで実行し、途中で失敗したら error のエンベロープにする。ソースごとに囲み、他のソースを止めない。
+#   エンベロープを 1 つも出さずに終わったときも error にする（ソースが結果から消えないように）。
 # - inventory_items [kind...] でインベントリの項目を JSON 配列で得る（--inventory が無ければその場で集める）。
 #   エンベロープごと読むときは ensure_inventory のあと $INVENTORY_FILE を jq で読む。
 #   照合に使う kind のインベントリの欠け（取得失敗か要確認）は inventory_notes [kind...] で補足として得て、
@@ -166,8 +167,9 @@ fetch_source() {
 
 # run_source <ソース> <層> <関数> [引数...]
 # 関数を set -e のサブシェルで実行する。途中で失敗したら出力を捨て、標準エラーの末尾を補足にした error のエンベロープを出す。
+# 終了コードが 0 でも、エンベロープを 1 つも出さなかったら error にする（§3.1。ソースが結果から消えないように）。
 run_source() {
-  local source="$1" layer="$2" out err rc message
+  local source="$1" layer="$2" out err rc count message detail
   shift 2
   out="$(mktemp "$WORK_DIR/out.XXXXXX")"
   err="$(mktemp "$WORK_DIR/err.XXXXXX")"
@@ -178,12 +180,18 @@ run_source() {
   ) >"$out" 2>"$err"
   rc=$?
   set -e
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -ne 0 ]; then
+    message="処理に失敗しました（終了コード ${rc}）"
+  elif ! count="$(jq -s length "$out" 2>/dev/null)"; then
+    message="出力を JSON として読めませんでした"
+  elif [ "$count" -eq 0 ]; then
+    message="エンベロープが出力されませんでした"
+  else
     cat "$out"
     return 0
   fi
-  message="$(tail -n 5 "$err")"
-  envelope_error "$source" "$layer" '{}' "処理に失敗しました（終了コード ${rc}）${message:+: $message}"
+  detail="$(tail -n 5 "$err")"
+  envelope_error "$source" "$layer" '{}' "${message}${detail:+: $detail}"
 }
 
 # ensure_inventory
@@ -617,7 +625,7 @@ OSV_BATCH=1000
 # リストの各行「URL<TAB>保存先」を並列に取得する。1 件が失敗しても残りは取得する。
 # 1 件ごとに「保存先<TAB>curl の終了コード<TAB>HTTP の状態コード<TAB>エラー」を出す（順不同）。
 # HTTP/2 の 404 は終了コードが 22 ではなく 56 になるので、404 かどうかは状態コードで見る。
-# curl が結果を出さなかったものは終了コード -1 にする。
+# curl が結果を出さなかったものは終了コード -1 にする（§3.2。結果の報告が空なら、すべてを失敗として扱う）。
 fetch_many() {
   local list="$1" report url out
   local args=()
@@ -631,8 +639,9 @@ fetch_many() {
   report="$(mktemp "$WORK_DIR/fetch.XXXXXX")"
   curl -fsSL --parallel --parallel-max 8 --max-time "$FETCH_TIMEOUT" \
     -w '%{filename_effective}\t%{exitcode}\t%{response_code}\t%{errormsg}\n' "$@" "${args[@]}" >"$report" 2>/dev/null || true
-  awk -F '\t' 'NR == FNR { seen[$1] = 1; print; next } !($2 in seen) { print $2 "\t-1\t000\tcurl が結果を出しませんでした" }' \
-    "$report" "$list"
+  # NR == FNR で 1 つ目のファイルを見分けると、報告が空のときにリストの行をそのまま出してしまうので、ファイル名で見分ける
+  awk -F '\t' 'FILENAME == ARGV[1] { seen[$1] = 1; print; next }
+    !($2 in seen) { print $2 "\t-1\t000\tcurl が結果を出しませんでした" }' "$report" "$list"
 }
 
 # inventory_notes [kind...]
@@ -1237,15 +1246,15 @@ RSS_JQ='
        cpe: [$f[] | select(.name == "cpe") | .text], cvss: [$f[] | select(.name == "cvss") | .attrs]}]}
 '
 
-# rss_items <ソース> <URL> <保存先>
-# RSS 1.0 を取得し、xmllint で項目を読んで {total, unparsed, items} を保存先に書く。total は xmllint が数えた項目の数。
+# rss_items <RSS のファイル> <保存先>
+# fetch_source で取得した RSS 1.0 を xmllint で読み、{total, unparsed, items} を保存先に書く。total は xmllint が数えた項目の数。
 # 項目は {about, title, link, identifier, date, issued, description, references, cpe, cvss}（references と cvss は属性のオブジェクト）。
-# 取得に失敗したら error、空なら warn のエンベロープを出して 1 を返す。XML として読めなければ失敗する
+# XML として読めなければ失敗する。`||` の左に置かない（set -e が効かなくなり、途中の失敗が素通りする）
 rss_items() {
-  local source="$1" url="$2" out="$3" rss="$WORK_DIR/$1.rdf" nodes="$WORK_DIR/$1.nodes" total
-  fetch_source "$source" layer1 "$url" "$rss" --compressed || return 1
+  local rss="$1" out="$2" nodes="$1.nodes" total
   total="$(xmllint --nocdata --xpath 'count(//*[local-name()="item"])' "$rss" 2>"$nodes")" ||
     die "RSS を XML として読めません: $(head -n 1 "$nodes")"
+  [[ $total =~ ^[0-9]+$ ]] || die "RSS の項目の数を読めません: ${total:-（空）}"
   if [ "$total" -eq 0 ]; then
     : >"$nodes"
   else
@@ -1259,14 +1268,15 @@ rss_items() {
 # 照合に使うのはタイトルと CPE の製品名。CPE のベンダー名にだけ当たる語（「GoogleのAndroid」の google）は除く。
 # Google や Apple の名前だけで Android や iOS の項目が大量に候補になるのを防ぐ。count は RSS から読んだ件数
 layer1_jvn_feed() {
-  local source="$1" url="$2" rss="$WORK_DIR/$1.json" index="$WORK_DIR/$1-index.json" result="$WORK_DIR/$1-result.json"
-  local text status=ok
+  local source="$1" url="$2" rdf="$WORK_DIR/$1.rdf" rss="$WORK_DIR/$1.json" index="$WORK_DIR/$1-index.json"
+  local result="$WORK_DIR/$1-result.json" text status=ok
   local notes=("更新分は未確認" "RSS が持っている範囲だけを照合（取得できた期間は evidence.period）")
   ensure_inventory
   text="$(inventory_notes)"
   add_warn_notes "$text"
   inventory_items | jq -c "$MATCH_JQ"'token_index' >"$index"
-  rss_items "$source" "$url" "$rss" || return 0
+  fetch_source "$source" layer1 "$url" "$rdf" --compressed || return 0
+  rss_items "$rdf" "$rss"
   jq -c --argjson now "$(now_epoch)" --argjson days "$LAYER1_STALE_DAYS" --arg zone "$(date +%z)" \
     --arg url "$url" --slurpfile index "$index" "$MATCH_JQ$LAYER1_JQ"'
     # cpe:/a:google:chrome（2.2）と cpe:2.3:a:google:chrome:…（2.3）のベンダー名と製品名
@@ -1296,9 +1306,10 @@ cmd_jvn() {
 # JPCERT/CC の RSS にある注意喚起（Weekly Report などを除く）を全件出す。期間は注意喚起の日付で、鮮度は Weekly Report を
 # 含む RSS 全体の日付で見る。この RSS の日付は dc:date だけで、更新された注意喚起では更新日。count は RSS から読んだ件数
 layer1_jpcert() {
-  local rss="$WORK_DIR/jpcert.json" result="$WORK_DIR/jpcert-result.json" text status=ok
+  local rdf="$WORK_DIR/jpcert.rdf" rss="$WORK_DIR/jpcert.json" result="$WORK_DIR/jpcert-result.json" text status=ok
   local notes=()
-  rss_items jpcert "$JPCERT_URL" "$rss" || return 0
+  fetch_source jpcert layer1 "$JPCERT_URL" "$rdf" --compressed || return 0
+  rss_items "$rdf" "$rss"
   jq -c --argjson now "$(now_epoch)" --argjson days "$LAYER1_STALE_DAYS" --arg zone "$(date +%z)" \
     --arg url "$JPCERT_URL" "$LAYER1_JQ"'
     rss_summary($now; $days; $zone; "注意喚起";

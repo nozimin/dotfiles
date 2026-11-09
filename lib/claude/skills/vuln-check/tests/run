@@ -103,6 +103,43 @@ case "$1" in
 esac
 EOF
   chmod +x "$FAKE_BIN"/*
+
+  # 7 で PATH の先頭に置く、OS 付属のコマンドの偽物（$TMP/bin-<名前>）。対象の呼び出し以外は本物に渡す
+  mkdir -p "$TMP/bin-curl" "$TMP/bin-xmllint" "$TMP/bin-jq"
+  # 並列取得（--parallel）だけ、転送の前に失敗して結果の報告（-w）を出さない
+  cat >"$TMP/bin-curl/curl" <<'EOF'
+#!/bin/bash
+for arg; do
+  if [ "$arg" = --parallel ]; then
+    echo 'curl: 偽の失敗' >&2
+    exit 2
+  fi
+done
+exec /usr/bin/curl "$@"
+EOF
+  # RSS の項目の数（count()）だけ、何も出さずに成功する
+  cat >"$TMP/bin-xmllint/xmllint" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *count\(*) exit 0 ;;
+esac
+exec /usr/bin/xmllint "$@"
+EOF
+  # jpcert の ok のエンベロープを組み立てる呼び出しだけ、何も出さずに成功する
+  cat >"$TMP/bin-jq/jq" <<'EOF'
+#!/bin/bash
+case " $* " in
+  *" --arg source jpcert "*" --arg status ok "*) exit 0 ;;
+esac
+exec /usr/bin/jq "$@"
+EOF
+  chmod +x "$TMP"/bin-*/*
+}
+
+# with_fake <名前>
+# 偽の <名前> を PATH の先頭に置く vulncheck の引数（PATH=…）を出す
+with_fake() {
+  echo "PATH=$TMP/bin-$1:$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 # 空のファイル。ベース URL のソース（OSV、formula、endoflife）は読むパスに置く
@@ -368,6 +405,24 @@ for sub in osv kev jvn; do
   vulncheck "$sub" --inventory "$TMP/inventory-no-ruby.json"
   expect "$sub: rbenv に Ruby が無いインベントリ → すべて ok（warn が広がらない）" 'all(.[]; .status == "ok")'
 done
+
+# URL ごとの取得結果が取れない（並列取得の curl が転送の前に失敗し、結果の報告が空）→ 成功とみなさず失敗として扱う
+vulncheck "$(with_fake curl)" latest --inventory "$INVENTORY"
+expect_status "brew-api: 並列取得の結果の報告が空 → error（他のソースは ok）" brew-api error
+vulncheck "$(with_fake curl)" osv --inventory "$INVENTORY"
+expect_status "osv: 詳細（v1/vulns/<id>）の並列取得の結果の報告が空 → warn" osv warn
+
+# ソースがエンベロープを出さずに終わる → run_source が error を出す（ソースが結果から消えない）
+vulncheck "$(with_fake jq)" jpcert
+expect "jpcert: エンベロープを出さずに終わる（偽の jq）→ error（エンベロープが出力されませんでした）" \
+  'envelope("jpcert") | .status == "error" and any(.notes[]; test("エンベロープが出力されませんでした"))'
+# RSS を読む途中の失敗を握りつぶさない（rss_items を || の左に置くと set -e が効かず、エンベロープを出さずに終わる）
+vulncheck "$(with_fake xmllint)" jvn --inventory "$INVENTORY"
+expect "jvn-ipedia と jvn: RSS の項目の数を読めない（偽の xmllint）→ error（処理に失敗しました）" \
+  '[envelope("jvn-ipedia"), envelope("jvn")] | all(.status == "error" and any(.notes[]; test("処理に失敗しました")))'
+vulncheck "$(with_fake xmllint)" jpcert
+expect "jpcert: RSS の項目の数を読めない（偽の xmllint）→ error（処理に失敗しました）" \
+  'envelope("jpcert") | .status == "error" and any(.notes[]; test("処理に失敗しました"))'
 
 step "まとめ"
 if [ "${#FAILED[@]}" -gt 0 ]; then
