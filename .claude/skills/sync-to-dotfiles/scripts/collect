@@ -28,6 +28,9 @@ IGNORE_IDS=()
 LIB_CHANGES=()
 DIRTY=()
 WARNINGS=()
+# Brewfile の別名と古い名前の読み替え（read_brew_renames）
+BREW_RENAMES=""
+BREW_RENAMES_READ=0
 # dotfiles 側（HEAD の lib/Brewfile と lib/zshrc）の内容
 HEAD_BREWFILE=""
 HEAD_ZSHRC=""
@@ -43,6 +46,28 @@ function nchars(s,   t) { t = s; return length(s) - gsub(/[\200-\277]/, "", t) }
 function truncate(s, max,   i, n) {
   for (i = 1; i <= length(s); i++)
     if (substr(s, i, 1) !~ /^[\200-\277]$/ && ++n > max) return substr(s, 1, i - 1)
+  return s
+}'
+
+# 行末のコメントを除いたコードの部分を返す awk の関数（コメントの行は空白だけになる）。
+# # は単語の先頭（行頭か、空白と ; & | ( ) の後）のときだけコメントの始まりとし、引用符の中のものと
+# \ でエスケープしたものは除かない（"a # b"、${#x}、$# はコメントではない）。q は開いている引用符
+# （$ の後ろの単一引用符は、中を \ でエスケープできるので、ふつうの単一引用符と分けて $' にする）
+AWK_CODE='
+function code(s,   i, c, q, start) {
+  start = 1
+  for (i = 1; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (q != "") {
+      if (c == q || (q == "$\047" && c == "\047")) q = ""
+      else if (c == "\\" && q != "\047") i++
+    }
+    else if (c == "#" && start) return substr(s, 1, i - 1)
+    else if (c == "\\") i++
+    else if (c == "\"") q = c
+    else if (c == "\047") q = (substr(s, i - 1, 1) == "$") ? "$\047" : c
+    start = (q == "" && c ~ /[[:space:];&|()]/)
+  }
   return s
 }'
 
@@ -99,10 +124,11 @@ is_ignored() {
 }
 
 # emit_item <種類> <識別子> <方向> <フラグ> <本文> [行の範囲]
-# 除外リストにある id は出さずに数える
+# 除外リストにある id の local の項目は出さずに数える（除外リストはローカル専用から作られるので、
+# 逆向きの差分は隠さない）
 emit_item() {
   local id="$1:$2" flags="${4#,}"
-  if is_ignored "$id"; then
+  if [ "$3" = local ] && is_ignored "$id"; then
     IGNORED=$((IGNORED + 1))
     return
   fi
@@ -125,13 +151,16 @@ has_flag() {
   return 1
 }
 
-# $HOME の絶対パスを含むか（/Users/foo に対して /Users/foobar は数えない）
+# 標準入力の各行を、コードの部分（行末のコメントを除いた部分）にして出す
+code_part() { awk "$AWK_CODE"'{ print code($0) }'; }
+
+# コードの部分に $HOME の絶対パスを含むか（/Users/foo に対して /Users/foobar は数えない）
 has_home_path() {
   local home="${HOME%/}"
   [ -n "$home" ] || return 1
-  printf '%s\n' "$1" | HOME_DIR="$home" awk '
+  printf '%s\n' "$1" | HOME_DIR="$home" awk "$AWK_CODE"'
     {
-      s = $0
+      s = code($0)
       while ((i = index(s, ENVIRON["HOME_DIR"])) > 0) {
         s = substr(s, i + length(ENVIRON["HOME_DIR"]))
         if (s !~ /^[[:alnum:]_.-]/) { found = 1; exit }
@@ -141,20 +170,23 @@ has_home_path() {
   '
 }
 
-# 存在しないパスを参照しているか
+# ~/... $HOME/... ${HOME}/... の形のパスを、$HOME の値で始まる形にして出す（ほかの形はそのまま）
+expand_home() {
+  # shellcheck disable=SC2016 # パターンの $HOME は文字どおり
+  case "$1" in
+    "~/"*) printf '%s' "$HOME/${1:2}" ;;
+    '$HOME/'*) printf '%s' "$HOME/${1:6}" ;;
+    '${HOME}/'*) printf '%s' "$HOME/${1:8}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# コードの部分で、存在しないパスを参照しているか
 has_missing_path() {
-  local ref path
+  local ref
   while IFS= read -r ref; do
-    ref="${ref//\\ / }"
-    # shellcheck disable=SC2016 # パターンの $HOME は文字どおり
-    case "$ref" in
-      "~/"*) path="$HOME/${ref:2}" ;;
-      '$HOME/'*) path="$HOME/${ref:6}" ;;
-      '${HOME}/'*) path="$HOME/${ref:8}" ;;
-      *) path="$ref" ;;
-    esac
-    [ -e "$path" ] || return 0
-  done < <(printf '%s\n' "$1" | grep -oE "$PATH_REF_RE" | sed 's|^[^~$/]||')
+    [ -e "$(expand_home "${ref//\\ / }")" ] || return 0
+  done < <(printf '%s\n' "$1" | code_part | grep -oE "$PATH_REF_RE" | sed 's|^[^~$/]||')
   return 1
 }
 
@@ -167,13 +199,15 @@ scan_secrets() {
       n = toupper(n)
       return n ~ /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL/ || n ~ /_KEY$/
     }
-    # v は引用符を外した値、q は値を囲む引用符（無ければ空）。
-    # SSH_KEY=~/.ssh/id_rsa、TOKENIZERS_PARALLELISM=false、MAX_TOKENS=4096 のような値は秘密情報ではない。
-    # ただし PASSWORD=12345 は数字だけでも秘密情報とし、単一引用符で囲んだ値は展開されない文字列なので $ で始まっても除かない
+    # v は引用符を外した値、q は値を囲む引用符（無ければ空。$ の後ろの単一引用符で囲んだ値は単一引用符として渡す）。
+    # SSH_KEY=~/.ssh/id_rsa、TOKEN_FILE=token.txt、TOKENIZERS_PARALLELISM=false、MAX_TOKENS=4096 のような値は
+    # 秘密情報ではない。ただし PASSWORD=12345 は数字だけでも秘密情報とし（PASSWORD_STORE_CLIP_TIME=45 は除く）、
+    # 単一引用符で囲んだ値は展開されない文字列なので $ で始まっても除かない
     function secret_value(name, v, q) {
-      if (v == "" || v ~ /^[~\/]/ || tolower(v) ~ /^(true|false|yes|no|on|off)$/) return 0
+      if (v == "" || v ~ /^~/ || index(v, "/") || tolower(v) ~ /^(true|false|yes|no|on|off)$/) return 0
+      if (tolower(v) ~ /\.(txt|json|ya?ml|toml|pem|key|conf|cfg|ini|env|gpg|asc)$/) return 0
       if (v ~ /^\$/ && q != "\047") return 0
-      return v !~ /^[0-9]+$/ || toupper(name) ~ /PASSWORD|PASSWD|SECRET/
+      return v !~ /^[0-9]+$/ || toupper(name) ~ /(PASSWORD|PASSWD|SECRET|PIN)$/
     }
     # 先頭の引用符で囲んだ文字列の中身（閉じていなければ最後まで）
     function unquote(s,   q, i, c, v) {
@@ -232,24 +266,35 @@ scan_secrets() {
       if (key ~ /^["\047]/) key = unquote(key)
       if (secret_name(key) && secret_value(key, value, q)) add_span(a, b)
     }
-    # 行の中の NAME=値 の形の単語（ws は単語の開始位置）。alias の引数（エイリアスの定義）と
-    # [[ ... ]] の中（比較）は代入ではない
-    function word(w, ws,   name, raw, q, v) {
+    # 行の中の NAME=値 の形の単語（ws は行の中の単語の開始位置）。[[ ... ]] の中（比較）と alias の名前は代入ではない。
+    # alias の値は、その中（引用符で囲んでいれば引用符の中）をコマンドとして同じ条件で調べる
+    # （alias deploy="HEROKU_API_KEY=... heroku deploy"）
+    function word(w, ws,   name, raw, q, v, d, e) {
       if (w == "") return
       if (skip == "[[") { if (w == "]]") skip = ""; return }
-      if (skip == "alias") return
+      if (skip == "alias") {
+        if (!(e = index(w, "="))) return
+        raw = substr(w, e + 1); ws += e
+        if (raw ~ /^["\047]/ && close_quote(raw) == length(raw)) assignments(substr(raw, 2, length(raw) - 2), ws)
+        else assignments(raw, ws - 1)
+        skip = "alias"
+        return
+      }
       if (w == "alias" || w == "[[") { skip = w; return }
       if (!match(w, /^[[:alpha:]_][[:alnum:]_]*\+?=/)) return
       name = substr(w, 1, RLENGTH - 1); sub(/\+$/, "", name)
       raw = substr(w, RLENGTH + 1); ws += RLENGTH
-      q = substr(raw, 1, 1); v = raw; gsub(/["\047]/, "", v)
+      # $ の後ろの単一引用符で囲んだ値（ANSI-C クォート）は、単一引用符と同じく展開されない文字列として扱う（d は $ の分）
+      d = (substr(raw, 1, 2) == "$\047")
+      q = substr(raw, d + 1, 1); v = substr(raw, d + 1); gsub(/["\047]/, "", v)
       if (q != "\"" && q != "\047") q = ""
       if (!secret_name(name) || !secret_value(name, v, q)) return
-      if (q != "" && close_quote(raw) == length(raw)) add_span(ws + 1, ws + length(raw) - 2)
+      if (q != "" && close_quote(substr(raw, d + 1)) == length(raw) - d) add_span(ws + d + 1, ws + length(raw) - 2)
       else add_span(ws, ws + length(raw) - 1)
     }
-    # 行を単語に分ける。コメントアウトした代入も数える（# を区切りとして扱う）
-    function assignments(s,   i, c, w, ws, q) {
+    # 行を単語に分ける。コメントアウトした代入も数える（# を区切りとして扱う）。
+    # off は、s が行の一部（alias の値）のときの、行の中の位置のずれ
+    function assignments(s, off,   i, c, w, ws, q) {
       skip = ""; w = ""; q = ""
       for (i = 1; i <= length(s); i++) {
         c = substr(s, i, 1)
@@ -261,7 +306,7 @@ scan_secrets() {
         else if (c ~ /[[:space:]]/) { word(w, ws); w = "" }
         else if (c ~ /[;&|()]/ || (c == "#" && w == "")) { word(w, ws); w = ""; skip = "" }
         else {
-          if (w == "") ws = i
+          if (w == "") ws = off + i
           if (c == "\"" || c == "\047") q = c
           w = w c
           if (c == "\\") w = w substr(s, ++i, 1)
@@ -294,10 +339,11 @@ scan_secrets() {
       nspan = 0
       private_key(s)
       config_pair(s)
-      assignments(s)
-      # よく知られた形のトークン（単語の先頭で、ある程度の長さが続くもの）
-      spans(s, "[^[:alnum:]_-](ghp_[[:alnum:]]{20,}|gho_[[:alnum:]]{20,}|github_pat_[[:alnum:]_]{20,}|npm_[[:alnum:]]{20,}|glpat-[[:alnum:]_-]{20,}|AIza[[:alnum:]_-]{30,}|sk-[[:alnum:]_-]{16,}|sk_live_[[:alnum:]]{16,}|rk_live_[[:alnum:]]{16,}|xox[[:alnum:]]-[[:alnum:]-]{10,}|AKIA[0-9A-Z]{16})", "^.", 0)
-      spans(s, "[^[:alnum:]_-][Bb]earer[[:space:]]+[[:alnum:]._~+/=-]{16,}", "^.[Bb]earer[[:space:]]+", 0)
+      assignments(s, 0)
+      # よく知られた形のトークン（行頭か、英数字と _ 以外の文字の直後から始まり、ある程度の長さが続くもの。
+      # ${GH_TOKEN:-ghp_...} の - の後も見る。disk- の sk- のように単語の途中のものは見ない）
+      spans(s, "[^[:alnum:]_](ghp_[[:alnum:]]{20,}|gho_[[:alnum:]]{20,}|github_pat_[[:alnum:]_]{20,}|npm_[[:alnum:]]{20,}|glpat-[[:alnum:]_-]{20,}|AIza[[:alnum:]_-]{30,}|sk-[[:alnum:]_-]{16,}|sk_live_[[:alnum:]]{16,}|rk_live_[[:alnum:]]{16,}|xox[[:alnum:]]-[[:alnum:]-]{10,}|AKIA[0-9A-Z]{16})", "^.", 0)
+      spans(s, "[^[:alnum:]_][Bb]earer[[:space:]]+[[:alnum:]._~+/=-]{16,}", "^.[Bb]earer[[:space:]]+", 0)
       # .npmrc の _authToken。$ で始まる値（${NPM_TOKEN}）は別の変数なので除く
       spans(s, "_authToken[[:space:]]*=[[:space:]]*[\"\047]?[^$[:space:]\"\047][^[:space:]\"\047]{7,}", "^_authToken[[:space:]]*=[[:space:]]*[\"\047]?", 0)
       # URL の中の認証情報（://<ユーザー>:<パスワード>@）。$ で始まるパスワードは、別の変数なので除く
@@ -361,15 +407,12 @@ noncomment_lines() {
   '
 }
 
-# in_dotfiles <段落のコメントでない行（noncomment_lines の形）>: その行が、すべて HEAD の lib/zshrc にあるか。
+# in_dotfiles <段落のコメントでない行（noncomment_lines の形）>: その行の並びが、HEAD の lib/zshrc のコメントでない行の
+# 中に、同じ順で連続して現れるか（関数から 1 行抜いたような変形版は当たらない。差分を見せずに消されないように）。
 # 作業ツリーと比べると、未コミットの変更にしかない行も dotfiles にあることになり、その変更を破棄したときに
 # 設定がどこにも残らなくなる
 in_dotfiles() {
-  local line
-  [ -n "$HEAD_ZSHRC" ] || return 1
-  while IFS= read -r line; do
-    [[ "$HEAD_ZSHRC_LINES" == *$'\n'"$line"$'\n'* ]] || return 1
-  done <<<"$1"
+  [ -n "$HEAD_ZSHRC" ] && [[ "$HEAD_ZSHRC_LINES" == *$'\n'"$1"$'\n'* ]]
 }
 
 # content_flags <内容>: 内容だけで決まるフラグを FLAGS にカンマ区切りで入れる。秘密情報は 1 回のスキャンで
@@ -418,6 +461,55 @@ print_repo() {
   for path in "${DIRTY[@]}"; do
     printf 'dirty: %s\n' "$path"
   done
+  print_zshrc_block
+}
+
+# sources_lib <dotfiles ブロックの内容>: コードの部分に、このリポジトリの lib/zshrc を source か . で読み込む行があるか。
+# パスの ~/ $HOME/ ${HOME}/ は $HOME の値にし、同じファイルかで比べる。ほかの worktree の lib/zshrc も
+# このリポジトリのものとする（worktree で collect を動かしても、~/.zshrc は元の場所の lib/zshrc を読んでいるため）
+sources_lib() {
+  local path lib libs
+  libs="$LIB_DIR/zshrc"$'\n'"$(repo_git worktree list --porcelain 2>/dev/null | sed -n 's|^worktree \(.*\)|\1/lib/zshrc|p')"
+  while IFS= read -r path; do
+    path="$(expand_home "$path")"
+    while IFS= read -r lib; do
+      [ "$path" -ef "$lib" ] && return 0
+    done <<<"$libs"
+  done < <(printf '%s\n' "$1" | awk "$AWK_CODE"'
+    {
+      s = code($0)
+      while (match(s, /(^|[[:space:];&|(){}])(source|\.)[[:space:]]+("[^"]*"|\047[^\047]*\047|[^[:space:];&|()"\047]+)/)) {
+        m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+        sub(/^[[:space:];&|(){}]?(source|\.)[[:space:]]+/, "", m); gsub(/["\047]/, "", m)
+        print m
+      }
+    }
+  ')
+  return 1
+}
+
+# ~/.zshrc の dotfiles ブロックの行の範囲（zshrc-block。無ければ none）と、ブロックの中にこのリポジトリの lib/zshrc を
+# 読み込む行があるか（zshrc-sources-lib）を出す。skill は、段落をローカルから消してよいか（消した設定が lib/zshrc から
+# 読み込まれるか）と、消した段落が実行されるようになる位置を、これで判断する。ブロックが複数あるときは lib/zshrc を
+# 読み込むものを、無ければ最初のものを出す。閉じていないブロックはファイルの最後までとする
+print_zshrc_block() {
+  local range=none sources=no rec
+  if [ -f "$HOME/.zshrc" ]; then
+    while IFS= read -r -d $'\034' rec; do
+      [ "$range" = none ] && range="${rec%%$'\035'*}"
+      if sources_lib "${rec#*$'\035'}"; then
+        range="${rec%%$'\035'*}"
+        sources=yes
+        break
+      fi
+    done < <(awk -v block_begin="# >>> $MARKER" -v block_end="# <<< $MARKER" '
+      index($0, block_begin) == 1 && !open { open = 1; from = NR; text = "" }
+      open { text = text $0 "\n" }
+      open && index($0, block_end) == 1 { printf "%d-%d\035%s\034", from, NR, text; open = 0 }
+      END { if (open) printf "%d-%d\035%s\034", from, NR, text }
+    ' "$HOME/.zshrc")
+  fi
+  printf 'zshrc-block: %s\nzshrc-sources-lib: %s\n' "$range" "$sources"
 }
 
 # --- brew / cask / tap ---
@@ -438,10 +530,45 @@ only_in() {
   ' <(printf '%s\n' "$2") <(printf '%s\n' "$1")
 }
 
+# インストール済みの formula と cask の別名と古い名前から、インストール済みの名前への対応を、BREW_RENAMES に
+# 「種類<TAB>別名か古い名前<TAB>名前」の行で読む（1 回だけ）。jq が無いか読めなければ、読み替えずに warn を出す
+read_brew_renames() {
+  local json
+  [ "$BREW_RENAMES_READ" -eq 0 ] || return 0
+  BREW_RENAMES_READ=1
+  if ! command -v jq >/dev/null 2>&1; then
+    add_warning "jq が見つからないため、Brewfile の別名や古い名前（postgresql → postgresql@14 など）を読み替えていません"
+  elif ! json="$(brew_cmd info --json=v2 --installed)" || ! BREW_RENAMES="$(printf '%s\n' "$json" | jq -r '
+    ((.formulae // [])[] | .name as $n | ((.aliases // []) + (.oldnames // []) + [.oldname // empty])[] | "brew\t\(.)\t\($n)"),
+    ((.casks // [])[] | .token as $n | (.old_tokens // [])[] | "cask\t\(.)\t\($n)")
+  ')"; then
+    BREW_RENAMES=""
+    add_warning "brew info --json=v2 --installed を読めなかったため、Brewfile の別名や古い名前（postgresql → postgresql@14 など）を読み替えていません"
+  fi
+}
+
+# rename_installed <種類> <Brewfile の名前> <インストール済みのもの>
+# Brewfile の名前のうち、インストールされていなくて、インストール済みのものの別名か古い名前であるものを、
+# インストール済みの名前に読み替えて出す（名前の最後の / より後ろで比べる）
+rename_installed() {
+  awk -F '\t' -v kind="$1" '
+    function base(s) { sub(/.*\//, "", s); return s }
+    FILENAME == ARGV[1] { if ($1 == kind) to[base($2)] = $3; next }
+    FILENAME == ARGV[2] { have[base($0)] = 1; next }
+    { b = base($0); print ((!(b in have) && (b in to)) ? to[b] : $0) }
+  ' <(printf '%s\n' "$BREW_RENAMES") <(printf '%s\n' "$3") <(printf '%s\n' "$2")
+}
+
 # compare_brew <種類> <ローカルで入れたもの> <インストール済みのもの> [base]
 compare_brew() {
   local kind="$1" in_brewfile known name
   in_brewfile="$(brewfile_names "$kind")"
+  # Brewfile の名前が別名や古い名前（postgresql → postgresql@14 など）なら、インストール済みの名前に読み替えてから比べる。
+  # brew info は遅いので、Brewfile にインストールされていないものがあるときだけ読む
+  if [ "$kind" != tap ] && [ -n "$(only_in "$in_brewfile" "$3" base)" ]; then
+    read_brew_renames
+    in_brewfile="$(rename_installed "$kind" "$in_brewfile" "$3")"
+  fi
   known="$in_brewfile"
   if [ "$kind" = tap ]; then
     # homebrew/core と homebrew/cask は出さない。Brewfile の完全な名前の行（brew "user/tap/foo"）から暗黙に
@@ -460,7 +587,8 @@ compare_brew() {
 
 collect_brew() {
   local requested formulae casks taps
-  if ! command -v brew >/dev/null 2>&1; then
+  # PATH に無ければ、インストール先から読み込む（cmd/common.sh の load_brew）
+  if ! load_brew; then
     add_warning "brew が見つからないため、brew / cask / tap を確認していません"
     return
   fi
@@ -521,13 +649,18 @@ has_unclosed_block() {
   ' "$1"
 }
 
-# 段落の最後の行（コメントと空行を除く）が、続きを待つ \ && || | で終わるか（zsh -n は、続きが無くても通す）。
-# \ は行の最後の文字のときだけ（"\ " はエスケープした空白）
+# 段落の最後のコメントでない行の、コードの部分（行末のコメントを除いた部分）が、続きを待つ \ && || | で終わるか
+# （zsh -n は、続きが無くても通す）。\ は行の最後の文字で、続く \ の数が奇数のときだけ（"\ " はエスケープした空白、
+# \\ はエスケープした \）。コメントの中の \ && || | は見ない
 ends_with_continuation() {
-  printf '%s\n' "$1" | awk '
-    /^[[:space:]]*(#|$)/ { next }
-    { last = $0 }
-    END { exit !(last ~ /\\$/ || last ~ /(&&|\|)[[:space:]]*$/) }
+  printf '%s\n' "$1" | awk "$AWK_CODE"'
+    { s = code($0) }
+    s ~ /^[[:space:]]*$/ { next }
+    { last = s }
+    END {
+      if (match(last, /\\+$/) && RLENGTH % 2 == 1) exit 0
+      exit !(last ~ /(&&|\|)[[:space:]]*$/)
+    }
   '
 }
 
@@ -542,22 +675,16 @@ zsh_complete() {
   esac
 }
 
-# 段落が、制御構文の行（then や do の後ろに中身の無い if や while の行、fi、{、} など）とコメントだけか
-control_only() {
-  printf '%s\n' "$1" | awk '
-    { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]*;?[[:space:]]*$/, "", s) }
-    s == "" || s ~ /^#/ { next }
-    s ~ /^(then|else|fi|do|done|esac|\{|\}|;;)$/ { next }
-    s ~ /^(if|elif|while|until|for|select|case)[[:space:]]/ && s !~ /[;[:space:]](then|do)[[:space:]]+[^[:space:]#]/ { next }
-    # 関数の定義と { の始まり、case のパターンだけの行
-    s ~ /^(function[[:space:]]+[^[:space:]]+|[^[:space:]()]+[[:space:]]*\(\))([[:space:]]*\{)?$/ { next }
-    s ~ /(&&|\|\|)[[:space:]]*\{$/ || s ~ /^\(?[^()[:space:]]*\)$/ { next }
-    { body = 1; exit }
-    END { exit body }
+# 段落のコードの部分（行末のコメントを除いた部分）に brew shellenv を含むか
+has_shellenv() {
+  printf '%s\n' "$1" | awk "$AWK_CODE"'
+    index(code($0), "brew shellenv") { found = 1; exit }
+    END { exit !found }
   '
 }
 
-# zsh_item <種類> <行の範囲> <段落>: 段落を 1 項目として出す。コメントだけの段落は出さない。
+# zsh_item <種類> <行の範囲> <段落> <状態>: 段落を 1 項目として出す。コメントだけの段落は出さない。
+# 状態が incomplete（zsh_unit を参照）なら warn を出す（行番号は lines の開始と同じ）。
 # id は、段落のコメントでない行を前後の空白を除いて " ⏎ " でつないだもの。
 # secret が立つものは、秘密情報を除外リストに書き写さないよう id を sha256:<SHA-256> にし、
 # 本文の秘密と判定した値を *** に置き換える（id とフラグは置き換える前の内容で決める）
@@ -565,6 +692,9 @@ zsh_item() {
   local lines key flags body="$3"
   lines="$(printf '%s\n' "$3" | noncomment_lines)"
   [ -n "$lines" ] || return 0
+  if [ "$4" = incomplete ]; then
+    add_warning "~/.$1 の ${2%-*} 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていないか、最後の行が \ && || | で終わる）ため、そこまでを 1 項目にしています"
+  fi
   key="${lines//$'\n'/ ⏎ }"
   content_flags "$3"
   flags="$FLAGS"
@@ -579,37 +709,23 @@ zsh_item() {
 # zsh_unit <種類> <開始行> <段落> <状態> [shellenv]
 # つないだ段落（ファイルの開始行からの連続した行）を 1 項目にする。状態は complete（構文として完結している）、
 # incomplete（完結しないまま、ファイルの最後か dotfiles ブロックの手前に来た）、unchecked（zsh が無い）。
-# shellenv を付けると brew shellenv を含む行を除き、前後に残った空行も除いて、残りの行の範囲を lines にする。
-# 除いた残りが制御構文の行とコメントだけになるか、完結していた段落が完結しなくなる（最後の行が続きを待つ形で
-# 終わるものを含む）ときは、段落ごと出さない（if ...; then eval "$(brew shellenv)"; fi から中身のない if を出さないため）
+# shellenv を付けると、コードの部分に brew shellenv を含む段落を段落ごと除き、その行の範囲を warn に出す
+# （dotfiles ブロック導入前に追記されたもの。arm64 と Intel で分ける if / else の一部だけを消すと、残った eval が
+# 無条件に走るため。同じ段落のほかの設定も項目にならないので、範囲を知らせる）
 zsh_unit() {
-  local range dropped body
-  {
-    read -r range dropped
-    body="$(cat)"
-  } < <(printf '%s\n' "$3" | awk -v first="$2" -v drop_shellenv="${5:+1}" -v blank="$BLANK_LINE_CHARS" '
-    drop_shellenv && /brew shellenv/ { dropped++; next }
-    { kept[++n] = $0; at[n] = first + NR - 1 }
-    END {
-      lo = 1; hi = n
-      while (lo <= hi && kept[lo] ~ /^[[:space:]]*$/ && length(kept[lo]) < blank) lo++
-      while (hi >= lo && kept[hi] ~ /^[[:space:]]*$/ && length(kept[hi]) < blank) hi--
-      if (lo > hi) { print "- " dropped + 0; exit }
-      print at[lo] "-" at[hi], dropped + 0
-      for (i = lo; i <= hi; i++) print kept[i]
-    }
-  ')
-  if [ "$dropped" -gt 0 ]; then
-    control_only "$body" && return 0
-    [ "$4" = complete ] && ! zsh_complete "$body" && return 0
+  local newlines="${3//[!$'\n']/}" range
+  range="$2-$(($2 + ${#newlines}))"
+  if [ -n "$5" ] && has_shellenv "$3"; then
+    add_warning "~/.$1 の $range 行目は brew shellenv を含む段落のため、項目にしていません（同じ段落のほかの設定も出していません）"
+    return 0
   fi
-  zsh_item "$1" "$range" "$body"
+  zsh_item "$1" "$range" "$3" "$4"
 }
 
 # collect_zsh <種類> <ファイル> [shellenv]
 # 段落は、構文として完結する（zsh_complete）まで次の段落とつなぐ（if や関数、ヒアドキュメントの中の空行や、
 # \ && || | で終わる行の後ろの空行で、fi や } だけの断片、閉じていないヒアドキュメント、続きの無い行ができないように）。
-# brew shellenv の行は、つないだ後で除く
+# brew shellenv を含む段落は、つないだ後で除く
 collect_zsh() {
   local kind="$1" file="$2" check=1 rec line gap para text="" start=""
   [ -f "$file" ] || return 0
@@ -624,7 +740,6 @@ collect_zsh() {
     # ブロックの手前かファイルの終わり。つないでいる途中なら、そこまでを 1 項目にする
     if [ -z "$rec" ]; then
       if [ -n "$text" ]; then
-        add_warning "~/.$kind の $start 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていないか、最後の行が \ && || | で終わる）ため、そこまでを 1 項目にしています"
         zsh_unit "$kind" "$start" "$text" incomplete "$3"
         text=""
       fi
