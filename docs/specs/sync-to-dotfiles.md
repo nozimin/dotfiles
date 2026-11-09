@@ -41,7 +41,7 @@
 - brew コマンドは `HOMEBREW_NO_AUTO_UPDATE=1` で呼ぶ。brew が無ければ `brew` `cask` `tap` を飛ばし、`warn` を出す。
 - 逆向きの差分も出す: Brewfile にあるのにインストールされていないもの。`brew` はインストール済みかを `brew list --formula`（依存として入ったものも含む）で判定する。
 - `brew` と `cask` は名前の最後の `/` より後ろで比べる（tap のフォーミュラは完全な名前と短い名前が混ざるため）。`tap` は名前全体で比べる。
-- サードパーティの tap のもの（`homebrew/core` と `homebrew/cask` 以外）は、`body` と `id` に完全な名前（`<user>/<tap>/<名前>`。`brew info --json=v2 --installed` の `full_name` / `full_token`）を出す。Brewfile に短い名前で書くと、新しい Mac の `brew bundle` が失敗するため。
+- サードパーティの tap のもの（`homebrew/core` と `homebrew/cask` 以外）は、`body` と `id` に完全な名前（`<user>/<tap>/<名前>`。`brew list --formula --installed-on-request --full-name` / `brew list --cask --full-name`）を出す。Brewfile に短い名前で書くと、新しい Mac の `brew bundle` が失敗するため。
 - dotfiles ブロック: `# >>> dotfiles` で始まる行から `# <<< dotfiles` で始まる行まで（`dotfiles: homebrew` のような名前付きも含む）。閉じていなければ開始行から最後までを除き、`warn` を出す。
 - `zprofile` では `brew shellenv` を含む行も除く（dotfiles ブロック導入前に追記されたもの）。
 - `zshrc` と `zprofile` は、空行で区切った「段落」を 1 項目にする。空行には空白だけの行も含めるが、100 文字以上の空白だけの行は段落に残す（§6 の `garbage`）。dotfiles ブロックも段落の区切りになる。コメントだけの段落と空の段落は出さない。
@@ -82,7 +82,7 @@ ignored: 1
 - `=== repo`: `branch` は現在のブランチ（detached HEAD なら `HEAD`）。`behind` と `ahead` は `refs/remotes/origin/<branch>` との差のコミット数。fetch に失敗したとき、`origin/<branch>` が無いとき、detached HEAD のときは `unknown` にし、理由を `warn` に出す。`dirty` は `lib/` 以外の未コミットの変更（未追跡を含む）で、1 ファイル 1 行、無ければ行を出さない。
 - `=== item`: 差分 1 件。
   - `kind`: §4 の種類。
-  - `id`: 除外リスト（§7）で使う識別子。`<kind>:<識別子>` の形。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落のコメントでない行を前後の空白を除いて ` ⏎ ` でつないだもの（1 行の段落ならその行。段落の中身が変われば別の項目として扱う）、`lib` はリポジトリからの相対パス。`secret` が立つ `zshrc` `zprofile` の項目は、秘密情報を除外リストに書き写さないよう `<kind>:sha256:<上の文字列の SHA-256>` にする。
+  - `id`: 除外リスト（§7）で使う識別子。`<kind>:<識別子>` の形。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落のコメントでない行を前後の空白を除いて ` ⏎ ` でつないだもの（1 行の段落ならその行。段落の中身が変われば別の項目として扱う）、`lib` はリポジトリからの相対パス。`secret` が立つ `zshrc` `zprofile` の項目は、秘密情報を除外リストに書き写さないよう `<kind>:sha256:<上の文字列の SHA-256>` にする（末尾に改行を付けない文字列から求める）。
   - `direction`: `local`（ローカルにだけある）、`dotfiles`（dotfiles にだけある）、`changed`（`lib/` の未コミットの変更）のどれか。
   - `flags`: §6 のフラグを、§6 の表の順にカンマ区切りで。無ければ `-`。
   - `body:` の後: 本文。各行の先頭に 4 スペースを付ける。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落の全文、`lib` は §5.1 の要約。
@@ -95,7 +95,7 @@ ignored: 1
 
 ### 5.1 `lib` の要約
 
-- `.plist`: 変わったキーのパスと、前後の値（80 文字を超える値は省略）。`HEAD` の内容と作業ツリーの内容を比べる。どちらかを plist として読めない（新規、削除、壊れている）ときは `git diff` にする。配列の要素が `Guid` キーを持つ辞書（iTerm2 のプロファイルなど）なら、位置ではなく `[Guid=<値>]` で識別する（要素の削除や並べ替えで、後ろの要素がすべて変わったように見えないため）。本文とフラグは、plist を 1 回だけ読んだ結果から作る。
+- `.plist`: 変わったキーのパスと、前後の値（80 文字を超える値は省略）。`HEAD` の内容と作業ツリーの内容を比べる。どちらかを plist として読めない（新規、削除、壊れている）ときは `git diff` にする。配列の要素が `Guid` キーを持つ辞書（iTerm2 のプロファイルなど）なら、位置ではなく `[Guid=<値>]` で識別する（要素の削除や並べ替えで、後ろの要素がすべて変わったように見えないため）。同じ配列で `Guid` が重なる要素は位置で識別する。本文とフラグは、plist を 1 回だけ読んだ結果から作る。
 - それ以外: `git diff` の内容。未追跡のファイルは先頭 200 行。
 - どれも 200 行を超えたら省略し、省略したことを書く。
 - 状態を表す補助の行を先頭に付けてよい: `(未追跡のファイル)`、`(バイナリファイル)`、`(空のファイル)`、`(シンボリックリンク: …)`、`(HEAD との差分はありません)` など。
@@ -116,9 +116,10 @@ ignored: 1
 
 `secret` の条件は次のどれか:
 
-- 変数への代入（`NAME=値`、`export NAME=値` など。`alias` の定義や `[[ ... == ... ]]` の比較は代入ではない）で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）と空の値は除く。
+- 変数への代入（`NAME=値`、`export NAME=値` など。`alias` の定義や `[[ ... == ... ]]` の比較は代入ではない）で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）、空の値、パス（`~` か `/` で始まる）、真偽値や数値だけの値（`true` `false` `yes` `no` `0` など）は除く（`SSH_KEY=~/.ssh/id_rsa` や `TOKENIZERS_PARALLELISM=false` で共通化を選べなくならないため）。
+- 設定ファイル形式の `キー: 値`、`キー = 値`、`"キー": "値"` で、キーが上と同じ条件に当たり、値も上と同じ除外に当たらないもの（`lib` の YAML / TOML / JSON のため）。
 - `ghp_` `gho_` `github_pat_` `sk-` `sk_live_` `rk_live_` `xox?-` `AKIA` で始まる値。単語の先頭で、ある程度の長さが続くものだけにする（`disk-` などに誤って反応しないため）。
-- URL の中の認証情報（`://<ユーザー>:<パスワード>@`）。
+- URL の中の認証情報（`://<ユーザー>:<パスワード>@`。パスワードが `$` で始まるものは除く）。
 
 複数のフラグが立ったときは `secret` > `in-dotfiles` > `missing-path` > `home-path` の順に優先する。`garbage` は、おすすめとは別に「取り込むときにその行を消す」という但し書きとして扱う。
 
