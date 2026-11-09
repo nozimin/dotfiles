@@ -96,6 +96,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 | `all [--save]` | - | `inventory` を実行し、その結果を使って他のすべてを実行し、全エンベロープを 1 つの配列で出す。`--save` を付けると、新しく作った一時ディレクトリのファイルに書き、標準出力にはそのパスだけを出す（skill がシェルのリダイレクトを使わずに済むようにする） |
 
 `--inventory FILE` を省略したときは、その場で `inventory` を実行する。`FILE` は `inventory` の出力（エンベロープ配列）と同じ形。
+`FILE` に、照合に使う kind のエンベロープが無いときは、その kind が欠けているものとして扱い、照合する側を `warn` にする（§3.1）。
 
 ## 4. インベントリ
 
@@ -107,11 +108,11 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 | `brew-cask` | brew | **.app を持たない cask だけ**（例: `claude-code`）。.app を持つ cask は `app` 側で扱う。フォントは除外 |
 | `app` | `/Applications` と `~/Applications` の下を 3 階層まで探した `.app`（`.app` の中には入らない。例: `/Applications/BOSS/GX-10/BOSS TONE STUDIO for GX-10.app`）。バージョンは Info.plist の `CFBundleShortVersionString` のみ（`CFBundleVersion` はビルド番号のことが多いので使わない） | brew の記録したバージョンは使わない。`origin` は `appstore`（`Contents/_MASReceipt` あり）/ `brew-cask` / `sparkle`（`SUFeedURL` あり）/ `other`。Safari は `macos` 側で扱う |
 | `npm` / `pnpm` | `npm ls -g --json --depth=0` / `pnpm ls -g --json` | ecosystem は npm |
-| `uv` | `uv tool list` | ecosystem は PyPI |
-| `gem` | rbenv の各 Ruby で `gem list` | ecosystem は RubyGems。インストール済みの版ごとに 1 項目（OSV の照合に正確な版が要る） |
+| `uv` | `uv tool list` | ecosystem は PyPI。標準エラーに「ツールを読み飛ばした」旨の警告（`Ignoring malformed tool` など）が出たら、一部が欠けているので `warn` |
+| `gem` | rbenv の各 Ruby で `gem list`（標準エラーは分けて読み、警告を項目として解析しない。警告は `notes` に書く） | ecosystem は RubyGems。インストール済みの版ごとに 1 項目（OSV の照合に正確な版が要る） |
 | `macos` | `sw_vers`、Safari の Info.plist | macOS 本体と Safari（`name: "Safari"`）の 2 項目 |
-| `ruby` | `rbenv versions --bare` | Ruby 本体 |
-| `vscode` | `code --list-extensions --show-versions` | |
+| `ruby` | `rbenv versions --bare --skip-aliases`（エイリアスのリンクを別の Ruby として数えない） | Ruby 本体 |
+| `vscode` | `code --list-extensions --show-versions`。`code` が `PATH` に無ければ、`app` のインベントリを探す場所（`VULNCHECK_APP_DIRS`）にある `Visual Studio Code.app` の中の `code` を使う | VS Code の .app があるのに `code` を使えないときは「未インストール」ではなく `warn` |
 
 - ツールが入っていない kind（例: `pnpm` が無い）は `warn` ではなく `ok` + `count: 0` + `notes` に「未インストール」と書く。
 - 0 件の扱い:
@@ -121,6 +122,8 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
   - どの kind でも、コマンドの失敗や解析の失敗は `error`。
 - バージョンを読めない項目（例: Steam）は項目を残し `version: null` にし、§3.1 の項目ごとの要確認（`review`）にする（参考になる値があれば理由に添える。例: Steam の `CFBundleVersion`）。エンベロープの `status` は変えない。
 - `origin` の値: `brew-formula` / `brew-cask` は tap、`gem` は `rbenv <版>`、`ruby` は `rbenv`、`app` は上表、それ以外は `null`。
+- `app` の探索は、探す場所がシンボリックリンクでもたどる（`find -H` など）。同じ名前のアプリが複数の場所にあるときは、`name` を「<名前>（<.app のあるディレクトリ。ホームは `~`>）」にして区別する（対象の同一性は kind + name なので、名前が重なると差分のタグが入れ替わる）。
+- `brew-cask` は .app を持たない cask だけだが、pkg や suite の cask が別の場所に .app を入れることがある。`latest` で同じ cask に対応付く `app` の項目があれば、`brew-cask` 側の項目は出さない（同じものを 2 つの対象として数えない）。
 - インベントリのエンベロープの `source` は kind 名。層2の `vscode` と同名になるので、エンベロープは `layer` と `source` の組で区別する。
 
 ## 5. 層2（全件照合）
@@ -150,6 +153,10 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 - `latest` の各取得元で、読み取った件数が 0 なら `warn`（§3.2）。cask API が 0 件のときも同じ（すべての .app が `unmapped` になり、異常が隠れるため）。ただし照合する項目が 1 つも無いために取得そのものをしなかったとき（例: rbenv に MRI 以外の Ruby（jruby など）しか無く、endoflife.date を引かなかった）は `ok` にし、`notes` にその理由を書く。
 - 対応付けできなかった項目は `method: "unmapped"`、`latest: null` として出し、§3.1 の項目ごとの要確認（`review`）にする。バージョン不明や比較不能の項目も同じ。エンベロープの `status` は変えない。AI がベンダーのページで最新版を調べる（§8.2）。
 - `update_command` は分かる範囲で入れる（例: `brew upgrade <formula>`、`brew upgrade --cask <cask>`、App Store、アプリ内の更新、`softwareupdate`）。
+- `brew-api` で、一部の formula の取得だけが失敗した（404 以外のエラーやタイムアウト）ときは、取得できた分の項目を残し、失敗した formula の項目に `review` を付け、エンベロープを `warn` にする（全体を `error` にして取得できた分を捨てない）。すべて失敗したときだけ `error`。
+- cask のバージョンの `,` から後ろ（`21.0.5,11` の `11` のようなビルド番号）は、インストール済みと最新版の両方で切り落としてから `compare` に渡す。
+- `softwareupdate --list` には時間の上限（120 秒）を設け、超えたら `error` にする（カタログに届かないと止まらないことがあるため）。
+- 読めない更新のうち、ラベルからメジャー版を読み取れて、それがインストール済みと別のメジャー版なら、macOS 本体の項目には当てない（`notes` に書くだけ）。読める同じメジャー版の更新があるときは、その更新で判定する。
 
 ### 5.3 VS Code 拡張（`vscode`）
 
@@ -176,7 +183,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 - **分割**: `.` `-` `_` `+` は区切り。区切りの無いところでも数字と英字の境目で分ける（`9.9p1` は `9` `9` `p` `1`、`1.0.0rc1` は `1` `0` `0` `rc` `1`）。数字は数として比べ、先頭の 0 は無視する。
 - **プレリリースの印**: `dev` < `alpha` = `a` < `beta` = `b` < `pre` = `preview` = `c` = `rc` の順。1 文字の `a` `b` `c` は、直後に数字が続くときだけ印とする（`2.0.0a1` は印、`2025a` や `1.1.1a` は印ではない）。印は、同じ位置にある数字や「版の終わり」より小さい（`1.2.3-beta lt 1.2.3`、`1.0.0rc1 lt 1.0.0`、`7.1.0.beta1 lt 7.1.0`）。
 - **それ以外の英字**（`p`、`t`、`w` など）は、リリース後の印として「版の終わり」より大きく、英字どうしは辞書順で比べる（`9.9p1 lt 9.9p2`、`1.1.1t lt 1.1.1w`、`2025a lt 2025b`、`1.0 lt 1.0p1`）。同じ位置で数字と英字が並んだら数字を大きいとする。
-- **末尾の 0**: 版の終わりの `0` の要素は無視する（`1.0 eq 1.0.0`）。
+- **末尾の 0**: 版の終わりと、プレリリースの印の直前で、`0` の要素は無視する（`1.0 eq 1.0.0`、`2.0rc1 eq 2.0.0rc1`）。
 - **区切りの `-` の後ろの数字**は、プレリリースではなく続きの要素として扱う（brew の revision `77.1_1`、日付の `2026-10-20`、`1.0.0-1 gt 1.0.0`）。semver の数字だけのプレリリース（`1.0.0-0`）は扱わない。
 - **比較不能**（終了コード 2。呼び出し側は「比較不能」として扱い、要確認にする）: 数字を 1 つも含まない入力、コミットの SHA のような並び（区切りの間の 7 文字以上の 16 進で、`a`〜`f` を 1 つ以上含むもの。`9e08eb8f…`。数字だけの `20261020` は当たらない）、区切り（`.` `-` `_` `+`）以外の記号（`~` `,` `:` など）を含む入力、空の入力。印に無い英字（`SNAPSHOT`、`nightly` など）はリリース後の英字として扱う。
 - `sort -V` は使わない（上の規則を実装するのに足りない）。`awk` で比べてよい。
@@ -303,6 +310,8 @@ P1 [継続] activestorage 7.2.1 → 7.2.3.2, 8.0.2 → 8.0.5.1
 - `cmd/setup` に `setup_claude_skills` を追加する。
   - `lib/claude/skills/*/` を順に処理し、`~/.claude/skills/<名前>` をそのディレクトリへのシンボリックリンクにする（ディレクトリ全体はリンクしない。既存の他の skill を壊さない）。
   - 既存の `cmd/common.sh` の関数（`link_file` など）と、README の「ツールを追加する」の約束事に従う: 済んでいれば `ok` を出して何もしない。同じ名前の実体があれば内容を見せて確認してから `~/.claude/skills-backup/<名前>.backup-<日時>` に退避する（`~/.claude/skills` の中に退避すると、退避したものも skill として読み込まれる）。古い場所を指すリンクは確認してから張り直す。
+  - `~/.claude/skills` 自体がシンボリックリンクなら（リンク先がこのリポジトリでも別の場所でも）、退避でリンク先の中身を動かしてしまうので、何もせず `fail` にする。
+  - ユーザーが確認で断ったときは `skip`、退避やリンクの作成そのものが失敗したときは `fail`（終了コード 1）。`link_file` はこの 2 つを区別して返す（既存の starship の手順も同じ扱いにする）。
 - README: セットアップ手順の表に「Claude skills」の行を足し、構成の節に `lib/claude/` と `docs/specs/` を足す。
 - `lib/claude-code.md`: skill のリンクの仕組み、`/vuln-check` の使い方、対象と対象外、レポートの保存先、外部に送る情報:
   - OSV.dev: 言語パッケージの名前とバージョン
@@ -319,7 +328,7 @@ P1 [継続] activestorage 7.2.1 → 7.2.3.2, 8.0.2 → 8.0.5.1
 4. `compare`（§7）: `1.9.5 lt 1.10.0`、`156.0.8078.9 lt 156.0.8078.81`、`77.1 lt 77.1_1`、`2026-10-20 gt 2025-02-25`、`5.10.2 GM (b5299, 5a516b44) eq 5.10.2`、`v1.0 eq 1.0.0`、`1.0.0-1 gt 1.0.0`、プレリリース（`1.2.3-beta lt 1.2.3`、`1.0.0rc1 lt 1.0.0`、`2.0.0a1 lt 2.0.0`、`7.1.0.beta1 lt 7.1.0`、`1.0.0.pre lt 1.0`、`1.2.3-alpha lt 1.2.3-beta`、`1.0.0rc1 lt 1.0.0rc2`）、リリース後の英字（`9.9p1 lt 9.9p2`、`1.1.1t lt 1.1.1w`、`2025a lt 2025b`、`1.0 lt 1.0p1`）、比較不能（数字を含まない入力、`9e08eb8f78fd` のような 16 進の並び、空の入力は終了コード 2）。
 5. 層1の鮮度: KEV、JVN iPedia、JVN、JPCERT/CC のそれぞれについて、`VULNCHECK_NOW` を最新の日付の 14 日後より後にすると `warn`、前にすると `ok` になる。取得できた期間が `evidence.period` に入っている。
 6. 項目ごとの要確認: バージョン不明や `unmapped` の項目があってもエンベロープは `ok` のままで、その項目に `review` が付き、`evidence.review` に件数が入る。
-7. silent failure の経路（コードレビュー 1 回目の指摘）: cask API が 0 件 → `warn`。URL ごとの取得結果が取れない → 失敗として扱う。ソースがエンベロープを出さずに終わる → `error`。照合に使うインベントリが一部欠けた（`warn` で項目あり）→ 照合する側も `warn`。`softwareupdate` の読めない更新 → `warn` と `review`。別のメジャー版へのアップグレードだけ → `outdated: false`。MRI 以外の Ruby だけ → endoflife は `ok`。rbenv に Ruby が無い → gem は `ok` で、osv と層1に `warn` が広がらない。OSV の `GIT` の範囲の SHA が `fixed` に入らない。
+. コードレビュー 2 回目の指摘の経路: rbenv のエイリアスを数えない。gem の警告が項目にならない。uv の読み飛ばしの警告で `warn`。formula の一部の取得失敗で `warn` と取得できた分の項目。探す場所がシンボリックリンクでもアプリを拾う。`~/Applications` の VS Code の `code` を使う。cask の `,` 付きのバージョンを比べられる。`softwareupdate` の時間の上限。別のメジャー版の読めない更新を macOS 本体に当てない。`2.0rc1 eq 2.0.0rc1`。同じ cask の `brew-cask` と `app` を二重に出さない。同じ名前のアプリを区別する。`--inventory` に無い kind で `warn`。setup: `~/.claude/skills` 自体がリンクなら `fail`、リンクの作成の失敗は `fail`。
 
 `tests/run` は全項目の結果を表示し、1 つでも失敗すれば終了コード 1。ネットワークが必要な試験（3）はそう明記する。
 最初の本番実行のレポートは、人が見てヤバさの一文と優先度の妥当性を確認する（自動試験の対象外）。
