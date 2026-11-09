@@ -10,12 +10,16 @@ export LC_ALL=C
 # git status と git diff が .git/index を書き換えないようにする
 export GIT_OPTIONAL_LOCKS=0
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." 2>/dev/null && pwd -P)"
-LIB_DIR="$REPO_ROOT/lib"
+# リポジトリは collect の場所（.claude/skills/sync-to-dotfiles/scripts/ の 4 つ上）から求める。
+# REPO_ROOT、LIB_DIR、dotfiles ブロックの名前（MARKER）は、この cmd/common.sh のものを使う
+COMMON_SH="$(dirname "${BASH_SOURCE[0]}")/../../../../cmd/common.sh"
 IGNORE_FILE="${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}"
 # lib の要約で出す最大の行数と、plist の値を省略する文字数
 MAX_LINES=200
 MAX_VALUE_CHARS=80
+# garbage とみなす長い行の文字数と、空白だけの行の文字数（空白だけの行は、これより短ければ段落の区切りにする）
+LONG_LINE_CHARS=1000
+BLANK_LINE_CHARS=100
 
 NO_FETCH=0
 ITEMS=0
@@ -24,6 +28,9 @@ IGNORE_IDS=()
 LIB_CHANGES=()
 DIRTY=()
 WARNINGS=()
+# dotfiles 側（HEAD の lib/Brewfile と lib/zshrc）の内容
+HEAD_BREWFILE=""
+HEAD_ZSHRC=""
 
 # UTF-8 の文字数を数える awk の関数（LC_ALL=C で、続きのバイト 0x80-0xBF を数えない）
 AWK_UTF8='
@@ -34,13 +41,10 @@ function truncate(s, max,   i, n) {
   return s
 }'
 
-# ~/... $HOME/... ${HOME}/... /Users/... の形のパス（直前は行頭か、パスに使わない文字）
+# ~/... $HOME/... ${HOME}/... /Users/... の形のパス（直前は行頭か、パスに使わない文字）。
+# 引用符の直後から始まるものは閉じる引用符の手前まで（空白を含む）、そうでないものは \ でエスケープした空白を含む
 # shellcheck disable=SC2016 # 正規表現の $HOME は文字どおり
-PATH_REF_RE='(^|[^[:alnum:]_./~$-])(~|\$HOME|\$\{HOME\}|/Users)/[^][:space:]"'\''`;:(){}|&<>*?$,[]*'
-# よく知られた形のトークン（単語の先頭で、ある程度の長さが続くもの）
-SECRET_VALUE_RE='(^|[^[:alnum:]_-])(ghp_[[:alnum:]]{20,}|gho_[[:alnum:]]{20,}|github_pat_[[:alnum:]_]{20,}|sk-[[:alnum:]_-]{16,}|sk_live_[[:alnum:]]{16,}|rk_live_[[:alnum:]]{16,}|xox[[:alnum:]]-[[:alnum:]-]{10,}|AKIA[0-9A-Z]{16})'
-# URL の中の認証情報（://<ユーザー>:<パスワード>@）。$ で始まるパスワードは、別の変数なので除く
-SECRET_URL_RE='://[^/[:space:]:@]*:[^$/[:space:]@][^/[:space:]@]*@'
+PATH_REF_RE='(^|[^[:alnum:]_./~$"'\''-])(~|\$HOME|\$\{HOME\}|/Users)/([^][:space:]"'\''`;:(){}|&<>*?$,[\]|\\ )*|["'\''](~|\$HOME|\$\{HOME\}|/Users)/[^]"'\''`;:(){}|&<>*?$,[]*'
 
 fatal() {
   printf 'collect: %s\n' "$1" >&2
@@ -64,13 +68,18 @@ head_lines() {
   '
 }
 
-# 除外リストを IGNORE_IDS に読み込む。空行と # で始まる行は無視する
+# 除外リストを IGNORE_IDS に読み込む。空行と # で始まる行は無視する。
+# 行末の空白と CR は取り除いてから比べる（手で編集したときに一致しなくならないように）。
+# lib: で始まる行は無視する（lib の項目はローカル専用にできない。隠すと、その未コミットの変更が取り込みの commit に混ざる）
 read_ignore_list() {
-  local line
+  local line shown
   [ -f "$IGNORE_FILE" ] || return 0
+  shown="$(pretty_path "$IGNORE_FILE")"
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%"${line##*[![:space:]]}"}"
     case "$line" in
       "" | "#"*) ;;
+      lib:*) add_warning "$shown の $line は、lib の項目はローカル専用にできないため無視しています" ;;
       *) IGNORE_IDS+=("$line") ;;
     esac
   done <"$IGNORE_FILE"
@@ -84,7 +93,7 @@ is_ignored() {
   return 1
 }
 
-# emit_item <種類> <識別子> <方向> <フラグ> <本文>
+# emit_item <種類> <識別子> <方向> <フラグ> <本文> [行の範囲]
 # 除外リストにある id は出さずに数える
 emit_item() {
   local id="$1:$2" flags="${4#,}"
@@ -93,11 +102,23 @@ emit_item() {
     return
   fi
   ITEMS=$((ITEMS + 1))
-  printf '=== item\nkind: %s\nid: %s\ndirection: %s\nflags: %s\nbody:\n' "$1" "$id" "$3" "${flags:--}"
+  printf '=== item\nkind: %s\nid: %s\n' "$1" "$id"
+  if [ -n "$6" ]; then
+    printf 'lines: %s\n' "$6"
+  fi
+  printf 'direction: %s\nflags: %s\nbody:\n' "$3" "${flags:--}"
   printf '%s\n' "$5" | indent
 }
 
 # --- フラグ（§6） ---
+
+# has_flag <フラグのカンマ区切り> <フラグ>
+has_flag() {
+  case ",$1," in
+    *",$2,"*) return 0 ;;
+  esac
+  return 1
+}
 
 # $HOME の絶対パスを含むか（/Users/foo に対して /Users/foobar は数えない）
 has_home_path() {
@@ -119,6 +140,7 @@ has_home_path() {
 has_missing_path() {
   local ref path
   while IFS= read -r ref; do
+    ref="${ref//\\ / }"
     # shellcheck disable=SC2016 # パターンの $HOME は文字どおり
     case "$ref" in
       "~/"*) path="$HOME/${ref:2}" ;;
@@ -131,19 +153,22 @@ has_missing_path() {
   return 1
 }
 
-# 秘密情報らしい名前の変数への代入か、設定ファイル形式のキーと値があるか。
-# 代入は、行を単語に分け、コマンドの先頭と export などの引数にある NAME=値 だけとみなす（alias の定義や
-# [[ ... == ... ]] の比較は代入ではない）。コメントアウトした代入も数える（# を区切りとして扱う）。
-# 値が $ で始まるもの（別の変数やコマンドの結果）、空の値、パス、真偽値や数値だけの値は除く
-has_secret_assignment() {
-  printf '%s\n' "$1" | awk '
+# scan_secrets <モード>: 標準入力から秘密情報（§6 の secret の条件）を探す。
+# check は、見つかれば終了コード 0。text、diff（git diff。差分の行は先頭の 1 文字を除いて調べる）、
+# plist（plist_changes の形。文字列の値を調べる）は、秘密と判定した値を *** に置き換えて出す
+scan_secrets() {
+  awk -v mode="$1" '
     function secret_name(n) {
       n = toupper(n)
       return n ~ /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL/ || n ~ /_KEY$/
     }
-    # SSH_KEY=~/.ssh/id_rsa や TOKENIZERS_PARALLELISM=false のような値は秘密情報ではない
-    function secret_value(v) {
-      return v != "" && v !~ /^[$~\/]/ && tolower(v) !~ /^(true|false|yes|no|on|off|[0-9]+)$/
+    # v は引用符を外した値、q は値を囲む引用符（無ければ空）。
+    # SSH_KEY=~/.ssh/id_rsa、TOKENIZERS_PARALLELISM=false、MAX_TOKENS=4096 のような値は秘密情報ではない。
+    # ただし PASSWORD=12345 は数字だけでも秘密情報とし、単一引用符で囲んだ値は展開されない文字列なので $ で始まっても除かない
+    function secret_value(name, v, q) {
+      if (v == "" || v ~ /^[~\/]/ || tolower(v) ~ /^(true|false|yes|no|on|off)$/) return 0
+      if (v ~ /^\$/ && q != "\047") return 0
+      return v !~ /^[0-9]+$/ || toupper(name) ~ /PASSWORD|PASSWD|SECRET/
     }
     # 先頭の引用符で囲んだ文字列の中身（閉じていなければ最後まで）
     function unquote(s,   q, i, c, v) {
@@ -156,87 +181,184 @@ has_secret_assignment() {
       }
       return v
     }
-    # 設定ファイル形式（YAML の キー: 値、TOML と ini の キー = 値、JSON の "キー": "値"）のキーと値か。
-    # コメントの行は見ない（説明の文に反応しないように）。"" で囲んだキーは "" で囲んだ値だけを見る
-    # （JSON の { や null に反応しないように）。囲んでいないキーの { や [ で始まる値も、中身なので見ない
-    function config_pair(s,   rest, pair, head, sep, key, value) {
-      if (s ~ /^[[:space:]]*(#|;|\/\/)/) return 0
+    # 先頭の引用符を閉じる引用符の位置（閉じていなければ length(s) + 1）
+    function close_quote(s,   q, i, c) {
+      q = substr(s, 1, 1)
+      for (i = 2; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == q) return i
+        if (c == "\\" && q == "\"") i++
+      }
+      return length(s) + 1
+    }
+    # 置き換える範囲（行の中の開始と終了の位置）を足す
+    function add_span(a, b) { if (a <= b) { span_s[++nspan] = a; span_e[nspan] = b } }
+    # 設定ファイル形式（YAML の キー: 値、TOML と ini の キー = 値、JSON の "キー": "値"）のキーと値。
+    # コメントの行は見ない（説明の文に反応しないように。// で始まる行は .npmrc の //registry.npmjs.org/:_authToken=...
+    # があるので見る）。"" で囲んだキーは "" で囲んだ値だけを見る（JSON の { や null に反応しないように）。
+    # 囲んでいないキーの { や [ で始まる値も、中身なので見ない
+    function config_pair(s,   rest, off, pair, pstart, key, value, vpos, head, sep, q, a, b) {
+      if (s ~ /^[[:space:]]*(#|;)/) return
       # JSON の "キー": "値" は、1 行に複数あってもよい
-      rest = s
+      rest = s; off = 0
       while (match(rest, /"[^"]*"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/)) {
-        pair = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
-        key = unquote(pair); sub(/^"[^"]*"[[:space:]]*:[[:space:]]*/, "", pair)
-        if (secret_name(key) && secret_value(unquote(pair))) return 1
+        pstart = off + RSTART; pair = substr(rest, RSTART, RLENGTH)
+        off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
+        key = unquote(pair)
+        match(pair, /^"[^"]*"[[:space:]]*:[[:space:]]*/)
+        value = substr(pair, RLENGTH + 1); vpos = pstart + RLENGTH
+        if (secret_name(key) && secret_value(key, unquote(value), "\"")) add_span(vpos + 1, vpos + length(value) - 2)
       }
       # 行頭の キー: 値 と キー = 値（YAML の "- " の後ろも見る）
-      if (!match(s, /^[[:space:]]*(-[[:space:]]+)?([[:alpha:]_][[:alnum:]_.-]*|"[^"]*"|\047[^\047]*\047)[[:space:]]*[:=]/)) return 0
-      head = substr(s, 1, RLENGTH - 1); sep = substr(s, RLENGTH, 1); rest = substr(s, RLENGTH + 1)
+      if (!match(s, /^[[:space:]]*(-[[:space:]]+)?([[:alpha:]_][[:alnum:]_.-]*|"[^"]*"|\047[^\047]*\047)[[:space:]]*[:=]/)) return
+      head = substr(s, 1, RLENGTH - 1); sep = substr(s, RLENGTH, 1); vpos = RLENGTH + 1; rest = substr(s, vpos)
       # 空白の無い NAME=値 はシェルの代入なので、代入として調べる（TOKENS=(a b) の配列などに反応しないように）
-      if (sep == "=" && head ~ /^[[:space:]]*[[:alpha:]_][[:alnum:]_]*$/) return 0
+      if (sep == "=" && head ~ /^[[:space:]]*[[:alpha:]_][[:alnum:]_]*$/) return
       # YAML の : の後ろには空白が要る（https://... などに反応しないように）
-      if (sep == ":" && rest !~ /^([[:space:]]|$)/) return 0
+      if (sep == ":" && rest !~ /^([[:space:]]|$)/) return
       key = head; sub(/^[[:space:]]*(-[[:space:]]+)?/, "", key); sub(/[[:space:]]+$/, "", key)
-      sub(/^[[:space:]]+/, "", rest)
-      if (rest ~ /^["\047]/) value = unquote(rest)
-      else if (key ~ /^["\047]/ || rest ~ /^(\[|\{)/) return 0
-      else { value = rest; sub(/(^|[[:space:]])#.*/, "", value); sub(/[[:space:],]+$/, "", value) }
-      if (key ~ /^["\047]/) key = unquote(key)
-      return secret_name(key) && secret_value(value)
-    }
-    # state: 0 はコマンドの先頭、1 は export などの引数、2 はコマンドの引数（代入ではない）
-    function word(w,   name, value) {
-      if (w == "" || state == 2) return
-      if (match(w, /^[[:alpha:]_][[:alnum:]_]*\+?=/)) {
-        name = substr(w, 1, RLENGTH - 1); sub(/\+$/, "", name)
-        value = substr(w, RLENGTH + 1); gsub(/["\047]/, "", value)
-        if (secret_name(name) && secret_value(value)) found = 1
+      match(rest, /^[[:space:]]*/); vpos += RLENGTH; rest = substr(rest, RLENGTH + 1)
+      if (rest ~ /^["\047]/) { q = substr(rest, 1, 1); value = unquote(rest); a = vpos + 1; b = vpos + close_quote(rest) - 2 }
+      else if (key ~ /^["\047]/ || rest ~ /^(\[|\{)/) return
+      else {
+        q = ""; value = rest; sub(/(^|[[:space:]])#.*/, "", value); sub(/[[:space:],]+$/, "", value)
+        a = vpos; b = vpos + length(value) - 1
       }
-      else if (state == 0 && w ~ /^(export|typeset|declare|local|readonly|integer|float|env)$/) state = 1
-      # then などの後ろは、まだコマンドの先頭。export などのオプションと値の無い変数名の後ろは、まだ引数
-      else if (state == 0 && w ~ /^(then|do|else|!|\{)$/) ;
-      else if (state == 1 && w ~ /^([-+]|[[:alpha:]_][[:alnum:]_]*$)/) ;
-      else state = 2
+      if (key ~ /^["\047]/) key = unquote(key)
+      if (secret_name(key) && secret_value(key, value, q)) add_span(a, b)
     }
-    {
-      if (config_pair($0)) { found = 1; exit }
-      state = 0; w = ""; q = ""
-      for (i = 1; i <= length($0); i++) {
-        c = substr($0, i, 1)
+    # 行の中の NAME=値 の形の単語（ws は単語の開始位置）。alias の引数（エイリアスの定義）と
+    # [[ ... ]] の中（比較）は代入ではない
+    function word(w, ws,   name, raw, q, v) {
+      if (w == "") return
+      if (skip == "[[") { if (w == "]]") skip = ""; return }
+      if (skip == "alias") return
+      if (w == "alias" || w == "[[") { skip = w; return }
+      if (!match(w, /^[[:alpha:]_][[:alnum:]_]*\+?=/)) return
+      name = substr(w, 1, RLENGTH - 1); sub(/\+$/, "", name)
+      raw = substr(w, RLENGTH + 1); ws += RLENGTH
+      q = substr(raw, 1, 1); v = raw; gsub(/["\047]/, "", v)
+      if (q != "\"" && q != "\047") q = ""
+      if (!secret_name(name) || !secret_value(name, v, q)) return
+      if (q != "" && close_quote(raw) == length(raw)) add_span(ws + 1, ws + length(raw) - 2)
+      else add_span(ws, ws + length(raw) - 1)
+    }
+    # 行を単語に分ける。コメントアウトした代入も数える（# を区切りとして扱う）
+    function assignments(s,   i, c, w, ws, q) {
+      skip = ""; w = ""; q = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
         if (q != "") {
           w = w c
           if (c == q) q = ""
-          else if (c == "\\" && q == "\"") w = w substr($0, ++i, 1)
+          else if (c == "\\" && q == "\"") w = w substr(s, ++i, 1)
         }
-        else if (c == "\"" || c == "\047") { q = c; w = w c }
-        else if (c == "\\") w = w c substr($0, ++i, 1)
-        else if (c ~ /[[:space:]]/) { word(w); w = "" }
-        else if (c ~ /[;&|()]/ || (c == "#" && w == "")) { word(w); w = ""; state = 0 }
-        else w = w c
+        else if (c ~ /[[:space:]]/) { word(w, ws); w = "" }
+        else if (c ~ /[;&|()]/ || (c == "#" && w == "")) { word(w, ws); w = ""; skip = "" }
+        else {
+          if (w == "") ws = i
+          if (c == "\"" || c == "\047") q = c
+          w = w c
+          if (c == "\\") w = w substr(s, ++i, 1)
+        }
       }
-      word(w)
+      word(w, ws)
     }
-    END { exit !found }
+    # re に当たる部分から、先頭の pre に当たる部分と末尾の post 文字を除いた範囲を足す。
+    # 行頭も単語の先頭として扱うため、先頭に空白を足した行で探す
+    function spans(s, re, pre, post,   t, off, m, a) {
+      t = " " s; off = -1
+      while (match(t, re)) {
+        m = substr(t, RSTART, RLENGTH); a = off + RSTART
+        off += RSTART + RLENGTH - 1; t = substr(t, RSTART + RLENGTH)
+        match(m, pre); add_span(a + RLENGTH, a + length(m) - 1 - post)
+      }
+    }
+    # 秘密鍵は、BEGIN の行より後ろから END の手前までを置き換える（JSON の "...\n..." のように 1 行に書いたものも）
+    function private_key(s,   p) {
+      p = 1
+      if (!in_key) {
+        if (!match(s, /-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----/)) return
+        found_key = 1; in_key = 1; p = RSTART + RLENGTH
+      }
+      if (match(substr(s, p), /-----END[A-Z0-9 ]*PRIVATE KEY-----/)) { add_span(p, p + RSTART - 2); in_key = 0 }
+      else add_span(p, length(s))
+    }
+    # 行の中の秘密情報の範囲を span_s / span_e に入れ、見つかれば真
+    function scan(s) {
+      nspan = 0
+      private_key(s)
+      config_pair(s)
+      assignments(s)
+      # よく知られた形のトークン（単語の先頭で、ある程度の長さが続くもの）
+      spans(s, "[^[:alnum:]_-](ghp_[[:alnum:]]{20,}|gho_[[:alnum:]]{20,}|github_pat_[[:alnum:]_]{20,}|npm_[[:alnum:]]{20,}|glpat-[[:alnum:]_-]{20,}|AIza[[:alnum:]_-]{30,}|sk-[[:alnum:]_-]{16,}|sk_live_[[:alnum:]]{16,}|rk_live_[[:alnum:]]{16,}|xox[[:alnum:]]-[[:alnum:]-]{10,}|AKIA[0-9A-Z]{16})", "^.", 0)
+      spans(s, "[^[:alnum:]_-][Bb]earer[[:space:]]+[[:alnum:]._~+/=-]{16,}", "^.[Bb]earer[[:space:]]+", 0)
+      # .npmrc の _authToken。$ で始まる値（${NPM_TOKEN}）は別の変数なので除く
+      spans(s, "_authToken[[:space:]]*=[[:space:]]*[\"\047]?[^$[:space:]\"\047][^[:space:]\"\047]{7,}", "^_authToken[[:space:]]*=[[:space:]]*[\"\047]?", 0)
+      # URL の中の認証情報（://<ユーザー>:<パスワード>@）。$ で始まるパスワードは、別の変数なので除く
+      spans(s, "://[^/[:space:]:@]*:[^$/[:space:]@][^/[:space:]@]*@", "^://[^/[:space:]:@]*:", 1)
+      return nspan > 0 || found_key
+    }
+    # scan した行の範囲を *** に置き換えた行（重なる範囲と隣り合う範囲はまとめる）
+    function masked(s,   i, j, t, a, b, out, p) {
+      for (i = 2; i <= nspan; i++)
+        for (j = i; j > 1 && span_s[j - 1] > span_s[j]; j--) {
+          t = span_s[j]; span_s[j] = span_s[j - 1]; span_s[j - 1] = t
+          t = span_e[j]; span_e[j] = span_e[j - 1]; span_e[j - 1] = t
+        }
+      out = ""; p = 1
+      for (i = 1; i <= nspan; i = j) {
+        a = span_s[i]; b = span_e[i]
+        for (j = i + 1; j <= nspan && span_s[j] <= b + 1; j++) if (span_e[j] > b) b = span_e[j]
+        out = out substr(s, p, a - p) "***"; p = b + 1
+      }
+      return out substr(s, p)
+    }
+    # plist の値。文字列は "" の中を \n で行に分けて調べる（data、数値、日付、真偽値は見ない）
+    function masked_value(v,   n, parts, i, out) {
+      if (v !~ /^".*"$/) return v
+      in_key = 0
+      n = split(substr(v, 2, length(v) - 2), parts, /\\n/)
+      out = ""
+      for (i = 1; i <= n; i++) { scan(parts[i]); out = out (i > 1 ? "\\n" : "") masked(parts[i]) }
+      return "\"" out "\""
+    }
+    mode == "check" { if (scan($0)) { found = 1; exit } next }
+    mode == "text" { scan($0); print masked($0); next }
+    # 差分の見出し（最初の @@ より前）はそのまま出す
+    mode == "diff" {
+      if (/^@@/) hunk = 1
+      if (!hunk) print
+      else if (/^[-+ ]/) { s = substr($0, 2); scan(s); print substr($0, 1, 1) masked(s) }
+      else { scan($0); print masked($0) }
+      next
+    }
+    mode == "plist" { split($0, f, "\t"); print f[1] "\t" masked_value(f[2]) "\t" masked_value(f[3]) }
+    END { if (mode == "check") exit !found }
   '
 }
 
-has_secret() {
-  printf '%s\n' "$1" | grep -qE "$SECRET_VALUE_RE|$SECRET_URL_RE" || has_secret_assignment "$1"
-}
+has_secret() { printf '%s\n' "$1" | scan_secrets check; }
 
-# 1000 文字以上の行か、100 文字以上の空白だけの行があるか
+# mask_secrets <モード> <内容>: 秘密と判定した値を *** に置き換える（モードは scan_secrets と同じ）
+mask_secrets() { printf '%s\n' "$2" | scan_secrets "$1"; }
+
+# LONG_LINE_CHARS 文字以上の行か、BLANK_LINE_CHARS 文字以上の空白だけの行があるか
 has_garbage() {
-  printf '%s\n' "$1" | awk "$AWK_UTF8"'
-    nchars($0) >= 1000 || (/^[[:space:]]+$/ && nchars($0) >= 100) { found = 1; exit }
+  printf '%s\n' "$1" | awk -v long="$LONG_LINE_CHARS" -v blank="$BLANK_LINE_CHARS" "$AWK_UTF8"'
+    nchars($0) >= long || (/^[[:space:]]+$/ && nchars($0) >= blank) { found = 1; exit }
     END { exit !found }
   '
 }
 
-# 段落のコメントでない行が、すべて lib/zshrc にあるか（前後の空白を除いて比べる）
+# 段落のコメントでない行が、すべて HEAD の lib/zshrc にあるか（前後の空白を除いて比べる）。
+# 作業ツリーと比べると、未コミットの変更にしかない行も dotfiles にあることになり、その変更を破棄したときに
+# 設定がどこにも残らなくなる
 in_dotfiles() {
-  [ -f "$LIB_DIR/zshrc" ] || return 1
-  printf '%s\n' "$1" | ZSHRC="$LIB_DIR/zshrc" awk '
+  [ -n "$HEAD_ZSHRC" ] || return 1
+  printf '%s\n' "$1" | ZSHRC="$HEAD_ZSHRC" awk '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-    BEGIN { while ((getline line < ENVIRON["ZSHRC"]) > 0) have[trim(line)] = 1 }
+    BEGIN { n = split(ENVIRON["ZSHRC"], lines, "\n"); for (i = 1; i <= n; i++) have[trim(lines[i])] = 1 }
     { line = trim($0) }
     line ~ /^(#|$)/ { next }
     !(line in have) { missing = 1 }
@@ -289,10 +411,9 @@ print_repo() {
 
 # --- brew / cask / tap ---
 
-# brewfile_names <種類>: lib/Brewfile の brew / cask / tap の名前を順に出す
+# brewfile_names <種類>: HEAD の lib/Brewfile の brew / cask / tap の名前を順に出す
 brewfile_names() {
-  [ -f "$LIB_DIR/Brewfile" ] || return 0
-  sed -nE "s/^[[:space:]]*$1[[:space:]]+[\"']([^\"']+)[\"'].*/\1/p" "$LIB_DIR/Brewfile"
+  printf '%s\n' "$HEAD_BREWFILE" | sed -nE "s/^[[:space:]]*$1[[:space:]]+[\"']([^\"']+)[\"'].*/\1/p"
 }
 
 # only_in <一覧 A> <一覧 B> [base]
@@ -308,11 +429,19 @@ only_in() {
 
 # compare_brew <種類> <ローカルで入れたもの> <インストール済みのもの> [base]
 compare_brew() {
-  local kind="$1" in_brewfile name
+  local kind="$1" in_brewfile known name
   in_brewfile="$(brewfile_names "$kind")"
+  known="$in_brewfile"
+  if [ "$kind" = tap ]; then
+    # homebrew/core と homebrew/cask は出さない。Brewfile の完全な名前の行（brew "user/tap/foo"）から暗黙に
+    # 追加される tap は、Brewfile にあるものとして扱う（逆向きの差分には出さない。消せる tap の行が無いため）
+    in_brewfile="$(printf '%s\n' "$in_brewfile" | grep -vxE 'homebrew/(core|cask)')"
+    known="$(printf 'homebrew/core\nhomebrew/cask\n%s\n' "$in_brewfile"
+      { brewfile_names brew; brewfile_names cask; } | sed -nE 's|^([^/]+/[^/]+)/[^/]+$|\1|p')"
+  fi
   while IFS= read -r name; do
     emit_item "$kind" "$name" local "" "$name"
-  done < <(only_in "$2" "$in_brewfile" "$4")
+  done < <(only_in "$2" "$known" "$4")
   while IFS= read -r name; do
     emit_item "$kind" "$name" dotfiles "" "$name"
   done < <(only_in "$in_brewfile" "$3" "$4")
@@ -347,25 +476,23 @@ collect_brew() {
 
 # --- zshrc / zprofile ---
 
-# zsh_paragraphs <ファイル> [shellenv]
+# zsh_paragraphs <ファイル>
 # dotfiles ブロックを除き、空行で区切った段落を「開始行 \035 直前の空行 \035 本文」の形で、\034 区切りで出す。
 # 直前の空行（1 行ごとに改行付き）は、前の段落とつなぐときに使う。ブロックの手前とファイルの終わりには
-# 空の記録を出す（そこを越えてはつながない）。空行には 100 文字未満の空白だけの行も含める（100 文字以上の
-# ものは garbage として段落に残す）。コメントだけの段落も出す（つないだ段落の途中に入ることがあるため）。
-# shellenv を付けると、brew shellenv を含む行も除く。
+# 空の記録を出す（そこを越えてはつながない）。空行には BLANK_LINE_CHARS 文字未満の空白だけの行も含める
+# （それ以上のものは garbage として段落に残す）。コメントだけの段落も出す（つないだ段落の途中に入ることがあるため）
 zsh_paragraphs() {
-  awk -v drop_shellenv="${2:+1}" '
+  awk -v block_begin="# >>> $MARKER" -v block_end="# <<< $MARKER" -v blank="$BLANK_LINE_CHARS" '
     function flush() {
       if (para == "") return
       printf "%d\035%s\035%s\034", start, gap, para
       para = gap = ""
     }
     function boundary() { flush(); printf "\034"; gap = "" }
-    /^# >>> dotfiles/ { boundary(); in_block = 1 }
-    in_block { if (/^# <<< dotfiles/) in_block = 0; next }
-    drop_shellenv && /brew shellenv/ { next }
+    index($0, block_begin) == 1 { boundary(); in_block = 1 }
+    in_block { if (index($0, block_end) == 1) in_block = 0; next }
     # 空白は 1 バイトの文字なので、length で文字数を数えられる
-    /^[[:space:]]*$/ && length($0) < 100 { flush(); gap = gap $0 "\n"; next }
+    /^[[:space:]]*$/ && length($0) < blank { flush(); gap = gap $0 "\n"; next }
     {
       if (para == "") start = NR
       para = para (para == "" ? "" : "\n") $0
@@ -376,11 +503,46 @@ zsh_paragraphs() {
 
 # dotfiles ブロックの終わりの行が無ければ真
 has_unclosed_block() {
-  awk '/^# >>> dotfiles/ { open = 1 } /^# <<< dotfiles/ { open = 0 } END { exit !open }' "$1"
+  awk -v block_begin="# >>> $MARKER" -v block_end="# <<< $MARKER" '
+    index($0, block_begin) == 1 { open = 1 }
+    index($0, block_end) == 1 { open = 0 }
+    END { exit !open }
+  ' "$1"
 }
 
-# 段落がそれだけで構文として完結しているか（zsh -n が通るか）。zsh の設定ファイルは読まない
-zsh_complete() { printf '%s\n' "$1" | zsh -f -n >/dev/null 2>&1; }
+# 段落がそれだけで構文として完結しているか。zsh -n が通り、ヒアドキュメントが閉じていれば真。
+# zsh -n は閉じていないヒアドキュメントを通すので、構文の誤りになる行（")"）を後ろに足しても通るかで確かめる
+# （閉じていなければ、足した行はヒアドキュメントの中身になる）。zsh の設定ファイルは読まない
+zsh_complete() {
+  printf '%s\n' "$1" | zsh -f -n >/dev/null 2>&1 || return 1
+  case "$1" in
+    *"<<"*) ! printf '%s\n)\n' "$1" | zsh -f -n >/dev/null 2>&1 ;;
+  esac
+}
+
+# 段落が、制御構文の行（then や do の後ろに中身の無い if や while の行、fi、{、} など）とコメントだけか
+control_only() {
+  printf '%s\n' "$1" | awk '
+    { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]*;?[[:space:]]*$/, "", s) }
+    s == "" || s ~ /^#/ { next }
+    s ~ /^(then|else|fi|do|done|esac|\{|\}|;;)$/ { next }
+    s ~ /^(if|elif|while|until|for|select|case)[[:space:]]/ && s !~ /[;[:space:]](then|do)[[:space:]]+[^[:space:]#]/ { next }
+    # 関数の定義と { の始まり、case のパターンだけの行
+    s ~ /^(function[[:space:]]+[^[:space:]]+|[^[:space:]()]+[[:space:]]*\(\))([[:space:]]*\{)?$/ { next }
+    s ~ /(&&|\|\|)[[:space:]]*\{$/ || s ~ /^\(?[^()[:space:]]*\)$/ { next }
+    { body = 1; exit }
+    END { exit body }
+  '
+}
+
+# 段落の最後の行（コメントと空行を除く）が、続きを待つ \ && || | で終わるか（zsh -n は、続きが無くても通す）
+ends_with_continuation() {
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*(#|$)/ { next }
+    { last = $0 }
+    END { sub(/[[:space:]]+$/, "", last); exit !(last ~ /(\\|&&|\|)$/) }
+  '
+}
 
 # 段落のコメントでない行を、前後の空白を除いて " ⏎ " でつなぐ（zshrc / zprofile の id）
 paragraph_key() {
@@ -390,22 +552,55 @@ paragraph_key() {
   '
 }
 
-# zsh_item <種類> <段落>: 段落を 1 項目として出す。コメントだけの段落は出さない。
-# secret が立つものは、秘密情報を除外リストに書き写さないよう、id を sha256:<SHA-256> にする
+# zsh_item <種類> <行の範囲> <段落>: 段落を 1 項目として出す。コメントだけの段落は出さない。
+# secret が立つものは、秘密情報を除外リストに書き写さないよう id を sha256:<SHA-256> にし、
+# 本文の秘密と判定した値を *** に置き換える（id とフラグは置き換える前の内容で決める）
 zsh_item() {
-  local key flags
-  key="$(paragraph_key "$2")"
+  local key flags body="$3"
+  key="$(paragraph_key "$3")"
   [ -n "$key" ] || return 0
-  flags="$(content_flags "$2")"
-  in_dotfiles "$2" && flags="$flags,in-dotfiles"
-  case "$flags," in
-    *,secret,*) key="sha256:$(printf '%s' "$key" | shasum -a 256 | cut -d ' ' -f 1)" ;;
-  esac
-  emit_item "$1" "$key" local "$flags" "$2"
+  flags="$(content_flags "$3")"
+  in_dotfiles "$3" && flags="$flags,in-dotfiles"
+  if has_flag "$flags" secret; then
+    key="sha256:$(printf '%s' "$key" | shasum -a 256 | cut -d ' ' -f 1)"
+    body="$(mask_secrets text "$3")"
+  fi
+  emit_item "$1" "$key" local "$flags" "$body" "$2"
+}
+
+# zsh_unit <種類> <開始行> <段落> <状態> [shellenv]
+# つないだ段落（ファイルの開始行からの連続した行）を 1 項目にする。状態は complete（構文として完結している）、
+# incomplete（完結しないまま、ファイルの最後か dotfiles ブロックの手前に来た）、unchecked（zsh が無い）。
+# shellenv を付けると brew shellenv を含む行を除き、前後に残った空行も除いて、残りの行の範囲を lines にする。
+# 除いた残りが制御構文の行とコメントだけになるか、完結していた段落が完結しなくなる（最後の行が続きを待つ形で
+# 終わるものを含む）ときは、段落ごと出さない（if ...; then eval "$(brew shellenv)"; fi から中身のない if を出さないため）
+zsh_unit() {
+  local range dropped body
+  {
+    read -r range dropped
+    body="$(cat)"
+  } < <(printf '%s\n' "$3" | awk -v first="$2" -v drop_shellenv="${5:+1}" -v blank="$BLANK_LINE_CHARS" '
+    drop_shellenv && /brew shellenv/ { dropped++; next }
+    { kept[++n] = $0; at[n] = first + NR - 1 }
+    END {
+      lo = 1; hi = n
+      while (lo <= hi && kept[lo] ~ /^[[:space:]]*$/ && length(kept[lo]) < blank) lo++
+      while (hi >= lo && kept[hi] ~ /^[[:space:]]*$/ && length(kept[hi]) < blank) hi--
+      if (lo > hi) { print "- " dropped + 0; exit }
+      print at[lo] "-" at[hi], dropped + 0
+      for (i = lo; i <= hi; i++) print kept[i]
+    }
+  ')
+  if [ "$dropped" -gt 0 ]; then
+    control_only "$body" && return 0
+    [ "$4" = complete ] && { ! zsh_complete "$body" || ends_with_continuation "$body"; } && return 0
+  fi
+  zsh_item "$1" "$range" "$body"
 }
 
 # collect_zsh <種類> <ファイル> [shellenv]
-# 段落は、zsh -n が通るまで次の段落とつなぐ（if や関数の中の空行で、fi や } だけの断片ができないように）
+# 段落は、構文として完結する（zsh_complete）まで次の段落とつなぐ（if や関数、ヒアドキュメントの中の空行で、
+# fi や } だけの断片や、閉じていないヒアドキュメントができないように）。brew shellenv の行は、つないだ後で除く
 collect_zsh() {
   local kind="$1" file="$2" check=1 rec line gap para text="" start=""
   [ -f "$file" ] || return 0
@@ -420,8 +615,8 @@ collect_zsh() {
     # ブロックの手前かファイルの終わり。つないでいる途中なら、そこまでを 1 項目にする
     if [ -z "$rec" ]; then
       if [ -n "$text" ]; then
-        add_warning "~/.$kind の $start 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも zsh -n が通らないため、そこまでを 1 項目にしています"
-        zsh_item "$kind" "$text"
+        add_warning "~/.$kind の $start 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていない）ため、そこまでを 1 項目にしています"
+        zsh_unit "$kind" "$start" "$text" incomplete "$3"
         text=""
       fi
       continue
@@ -436,11 +631,14 @@ collect_zsh() {
     else
       text="$text"$'\n'"$gap$para"
     fi
-    if [ "$check" -eq 0 ] || zsh_complete "$text"; then
-      zsh_item "$kind" "$text"
+    if [ "$check" -eq 0 ]; then
+      zsh_unit "$kind" "$start" "$text" unchecked "$3"
+      text=""
+    elif zsh_complete "$text"; then
+      zsh_unit "$kind" "$start" "$text" complete "$3"
       text=""
     fi
-  done < <(zsh_paragraphs "$file" "$3")
+  done < <(zsh_paragraphs "$file")
 }
 
 # --- lib ---
@@ -515,7 +713,8 @@ plist_lines() {
 
 # plist_changes <パス>
 # HEAD と作業ツリーの plist を 1 回ずつ読んで比べ、変わったキーを「パス<TAB>前の値<TAB>後の値」の行で出す
-# （値が無いほうは空）。どちらかを plist として読めなければ偽。
+# （値が無いほうは空）。どちらかを plist として読めなければ偽。値は文字列として比べる（数として比べると、
+# 2^53 を超える整数の変化や、整数の 0 から実数の 0.0 への変化を見逃すため）
 plist_changes() {
   local before after
   [ -f "$REPO_ROOT/$1" ] || return 1
@@ -526,7 +725,7 @@ plist_changes() {
     {
       seen[$1] = 1
       if (!($1 in before)) print $1 "\t\t" $2
-      else if (before[$1] != $2) print $1 "\t" before[$1] "\t" $2
+      else if (before[$1] "" != $2 "") print $1 "\t" before[$1] "\t" $2
     }
     END { for (i = 1; i <= n; i++) if (!(order[i] in seen)) print order[i] "\t" before[order[i]] "\t" }
   ' <(printf '%s\n' "$before") <(printf '%s\n' "$after")
@@ -561,9 +760,10 @@ added_lines() {
   awk '/^@@/ { hunk = 1; next } hunk && /^\+/ { print substr($0, 2) }'
 }
 
-# lib_item <"XY パス">: lib/ の変更 1 件を要約して出す。フラグは足された内容で判定する
+# lib_item <"XY パス">: lib/ の変更 1 件を要約して出す。フラグは足された内容で判定し、
+# secret が立つものは本文の秘密と判定した値を *** に置き換える
 lib_item() {
-  local status="${1:0:2}" path="${1:3}" file body flag_text="" diff changes
+  local status="${1:0:2}" path="${1:3}" file body flags="" diff changes content
   file="$REPO_ROOT/$path"
   if [ "$status" = "??" ]; then
     body="(未追跡のファイル)"
@@ -574,25 +774,29 @@ lib_item() {
     elif ! grep -qI '' "$file"; then
       body="$body"$'\n'"(バイナリファイル)"
     else
-      body="$body"$'\n'"$(head_lines <"$file")"
-      flag_text="$(cat "$file")"
+      flags="$(content_flags "$(cat "$file")")"
+      content="$(head_lines <"$file")"
+      has_flag "$flags" secret && content="$(mask_secrets text "$content")"
+      body="$body"$'\n'"$content"
     fi
   elif [ "${path%.plist}" != "$path" ] && changes="$(plist_changes "$path")"; then
     # 本文とフラグは、plist を 1 回だけ読んだ結果から作る（間に iTerm2 が保存しても食い違わないように）
-    if [ -n "$changes" ]; then
-      body="$(printf '%s\n' "$changes" | plist_summary | head_lines)"
-    else
+    flags="$(content_flags "$(printf '%s\n' "$changes" | plist_added_values)")"
+    if [ -z "$changes" ]; then
       body="(キーと値は HEAD と同じです。書式だけが変わっています)"
+    else
+      has_flag "$flags" secret && changes="$(mask_secrets plist "$changes")"
+      body="$(printf '%s\n' "$changes" | plist_summary | head_lines)"
     fi
-    flag_text="$(printf '%s\n' "$changes" | plist_added_values)"
   else
     # plist 以外と、plist として読めないもの（削除や新規の追加）は git diff で出す
     diff="$(repo_git diff --no-color --no-ext-diff HEAD -- "$path")"
+    flags="$(content_flags "$(printf '%s\n' "$diff" | added_lines)")"
     body="$(printf '%s\n' "$diff" | head_lines)"
-    flag_text="$(printf '%s\n' "$diff" | added_lines)"
+    has_flag "$flags" secret && body="$(mask_secrets diff "$body")"
     [ -n "$diff" ] || body="(HEAD との差分はありません)"
   fi
-  emit_item lib "$path" changed "$(content_flags "$flag_text")" "$body"
+  emit_item lib "$path" changed "$flags" "$body"
 }
 
 collect_lib() {
@@ -618,10 +822,18 @@ for arg in "$@"; do
 done
 
 command -v git >/dev/null 2>&1 || fatal "git が見つかりません"
-if [ -z "$REPO_ROOT" ] || [ ! -d "$LIB_DIR" ] ||
+if [ -f "$COMMON_SH" ]; then
+  # cmd/common.sh は、shellcheck に -x を付けたときだけ読ませる（付けなければ SC1091 を出さずに飛ばす）
+  # shellcheck source-path=SCRIPTDIR/../../../.. source=cmd/common.sh disable=SC1091
+  source "$COMMON_SH"
+fi
+if [ -z "${REPO_ROOT:-}" ] || [ ! -d "$LIB_DIR" ] ||
   [ "$(repo_git rev-parse --show-toplevel 2>/dev/null)" != "$REPO_ROOT" ]; then
   fatal "dotfiles リポジトリが見つかりません（collect は .claude/skills/sync-to-dotfiles/scripts/ に置きます）"
 fi
+# dotfiles 側は HEAD の内容と比べる（作業ツリーの未コミットの変更は lib の項目として別に出る）
+HEAD_BREWFILE="$(repo_git show HEAD:lib/Brewfile 2>/dev/null)"
+HEAD_ZSHRC="$(repo_git show HEAD:lib/zshrc 2>/dev/null)"
 
 read_ignore_list
 read_status
