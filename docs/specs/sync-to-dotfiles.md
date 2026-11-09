@@ -40,7 +40,7 @@
 
 - brew コマンドは `HOMEBREW_NO_AUTO_UPDATE=1` で呼ぶ。brew が無ければ `brew` `cask` `tap` を飛ばし、`warn` を出す。
 - 逆向きの差分も出す: Brewfile にあるのにインストールされていないもの。`brew` はインストール済みかを `brew list --formula`（依存として入ったものも含む）で判定する。
-- `brew` と `cask` は名前の最後の `/` より後ろで比べる（tap のフォーミュラは完全な名前と短い名前が混ざるため）。Brewfile の名前が別名や古い名前（`postgresql` → `postgresql@14` など）のときは、`brew info --json=v2 --installed` の `aliases` / `oldnames`（cask は `old_tokens`）で、インストール済みの名前に読み替えてから比べる（`jq` が無ければ読み替えず、`warn` を出す）。brew は `PATH` に無ければ `cmd/common.sh` の `load_brew` で探す。`tap` は名前全体で比べる。`homebrew/core` と `homebrew/cask` は出さない。Brewfile の完全な名前の行（`brew "user/tap/foo"`）から暗黙に追加される tap は、Brewfile にあるものとして扱う（ローカル側の項目を出さないためだけに使い、逆向きの差分には出さない。消せる `tap` の行が無いため）。
+- `brew` と `cask` は名前の最後の `/` より後ろで比べる（tap のフォーミュラは完全な名前と短い名前が混ざるため）。Brewfile の名前が別名や古い名前（`postgresql` → `postgresql@14` など）のときは、`brew info --json=v2 --installed` の `aliases` / `oldnames`（cask は `old_tokens`）で、インストール済みの名前に読み替えてから比べる（`jq` が無ければ読み替えず、`warn` を出す。読み替えが要るとき、つまり Brewfile にインストールされていない名前があるときだけ `brew info` を呼ぶ）。brew は `PATH` に無ければ `cmd/common.sh` の `load_brew` で探す。`tap` は名前全体で比べる。`homebrew/core` と `homebrew/cask` は出さない。Brewfile の完全な名前の行（`brew "user/tap/foo"`）から暗黙に追加される tap は、Brewfile にあるものとして扱う（ローカル側の項目を出さないためだけに使い、逆向きの差分には出さない。消せる `tap` の行が無いため）。
 - dotfiles 側（`lib/Brewfile` と `lib/zshrc`）は `HEAD` の内容と比べる（`git show HEAD:<パス>`）。作業ツリーの未コミットの変更は `lib` の項目として別に出る。作業ツリーと比べると、未コミットの変更にしかない行が「dotfiles にある」と判定され、その変更を破棄したときに設定がどこにも残らなくなるため。
 - サードパーティの tap のもの（`homebrew/core` と `homebrew/cask` 以外）は、`body` と `id` に完全な名前（`<user>/<tap>/<名前>`。`brew list --formula --installed-on-request --full-name` / `brew list --cask --full-name`）を出す。Brewfile に短い名前で書くと、新しい Mac の `brew bundle` が失敗するため。
 - dotfiles ブロック: `# >>> dotfiles` で始まる行から `# <<< dotfiles` で始まる行まで（`dotfiles: homebrew` のような名前付きも含む）。閉じていなければ開始行から最後までを除き、`warn` を出す。
@@ -83,7 +83,7 @@ items: 12
 ignored: 1
 ```
 
-- `=== repo`: `branch` は現在のブランチ（detached HEAD なら `HEAD`）。`behind` と `ahead` は `refs/remotes/origin/<branch>` との差のコミット数。fetch に失敗したとき、`origin/<branch>` が無いとき、detached HEAD のときは `unknown` にし、理由を `warn` に出す。`dirty` は `lib/` 以外の未コミットの変更（未追跡を含む）で、1 ファイル 1 行、無ければ行を出さない。`zshrc-block` は `~/.zshrc` の dotfiles ブロックの行の範囲（`7-9`。無ければ `none`。ブロックが複数あるときは、このリポジトリの `lib/zshrc` を source する行があるブロック、無ければ最初のブロック）。`zshrc-sources-lib` は、そのブロックの中にこのリポジトリの `lib/zshrc` を source する行があるか（`yes` / `no`）。
+- `=== repo`: `branch` は現在のブランチ（detached HEAD なら `HEAD`）。`behind` と `ahead` は `refs/remotes/origin/<branch>` との差のコミット数。fetch に失敗したとき、`origin/<branch>` が無いとき、detached HEAD のときは `unknown` にし、理由を `warn` に出す。`dirty` は `lib/` 以外の未コミットの変更（未追跡を含む）で、1 ファイル 1 行、無ければ行を出さない。`zshrc-block` は `~/.zshrc` の dotfiles ブロックの行の範囲（`7-9`。無ければ `none`。ブロックが複数あるときは、このリポジトリの `lib/zshrc` を source する行があるブロック、無ければ最初のブロック）。`zshrc-sources-lib` は、そのブロックの中にこのリポジトリ（同じリポジトリのどの worktree でもよい）の `lib/zshrc` を source する行があるか（`yes` / `no`）。
 - `=== item`: 差分 1 件。
   - `kind`: §4 の種類。
   - `id`: 除外リスト（§7）で使う識別子。`<kind>:<識別子>` の形。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落のコメントでない行を前後の空白を除いて ` ⏎ ` でつないだもの（1 行の段落ならその行。段落の中身が変われば別の項目として扱う）、`lib` はリポジトリからの相対パス。`secret` が立つ `zshrc` `zprofile` の項目は、秘密情報を除外リストに書き写さないよう `<kind>:sha256:<上の文字列の SHA-256>` にする（末尾に改行を付けない文字列から求める）。
@@ -94,7 +94,7 @@ ignored: 1
 - `=== warn`: 確認できなかったこと（1 行 1 件）。無ければブロックを出さない。段落について出す `warn` の行番号は、その項目の `lines` の開始と同じにする。項目にならなかった段落（`brew shellenv` を含むものなど）には、「閉じていない」の `warn` を出さない。
 - `=== summary`: `items`（出した項目数）と `ignored`（除外リストで除いた数）。
 - オプション: `--no-fetch`（`git fetch` しない。`behind` と `ahead` はローカルの追跡ブランチで数える）。
-- テストのために `HOME` と `PATH` を差し替えて動くようにする（`~` は `$HOME` で解決し、brew は `PATH` から探す）。除外リストの場所は環境変数 `DOTFILES_IGNORE_FILE` で差し替えられる。
+- テストのために `HOME` と `PATH` を差し替えて動くようにする（`~` は `$HOME` で解決し、brew は `PATH` から探して、無ければ `load_brew` で探す。そのため brew が標準の場所にある Mac では、brew が無い状態はテストで作れない）。除外リストの場所は環境変数 `DOTFILES_IGNORE_FILE` で差し替えられる。
 - リポジトリの場所は collect 自身の場所から求める（`.claude/skills/sync-to-dotfiles/scripts/` の 4 つ上）。
 - 終了コード: 出力できたら 0。リポジトリが見つからないなど、出力できなかったら 1。
 
@@ -121,7 +121,7 @@ ignored: 1
 
 `secret` の条件は次のどれか:
 
-- 変数への代入（行の中の `NAME=値` の形の単語。`export` `sudo` `env` の引数、`;` `{` `then` `if` の後なども含む。`alias` の名前と `[[ ... ]]` の中は代入ではない。`alias` の値（引用符の中）は、その中をコマンドとして同じ条件で見る（`alias deploy='HEROKU_API_KEY=... heroku deploy'`））で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）、空の値、パス（`~` か `/` で始まるもの、`/` を含むもの、`.txt` `.json` `.yaml` `.yml` `.toml` `.pem` `.key` `.conf` `.cfg` `.ini` `.env` `.gpg` `.asc` で終わるもの）、真偽値や数値だけの値（`true` `false` `yes` `no` `0` など）は除く（`SSH_KEY=~/.ssh/id_rsa` や `TOKENIZERS_PARALLELISM=false` や `MAX_TOKENS=4096` で共通化を選べなくならないため）。ただし数値だけの値の除外は、名前が `PASSWORD` `PASSWD` `SECRET` `PIN` で終わるときは行わない（`PASSWORD=12345`。`PASSWORD_STORE_CLIP_TIME=45` は除く）。`$` の除外は、単一引用符で囲んだ値と `$'...'`（どちらも展開されない文字列）には行わない。
+- 変数への代入（行の中の `NAME=値` の形の単語。`export` `sudo` `env` の引数、`;` `{` `then` `if` の後なども含む。`alias` の名前と `[[ ... ]]` の中は代入ではない。`alias` の値（引用符の中）は、その中をコマンドとして同じ条件で見る（`alias deploy='HEROKU_API_KEY=... heroku deploy'`））で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）、空の値、パス（`~` `/` `./` `../` で始まるもの、名前が `_FILE` `_PATH` `_DIR` で終わるもの、`.txt` `.json` `.yaml` `.yml` `.toml` `.pem` `.key` `.conf` `.cfg` `.ini` `.env` `.gpg` `.asc` で終わるもの。`/` を含むだけの値は除かない。base64 の秘密は `/` を含むため）、真偽値や数値だけの値（`true` `false` `yes` `no` `0` など）は除く（`SSH_KEY=~/.ssh/id_rsa` や `TOKENIZERS_PARALLELISM=false` や `MAX_TOKENS=4096` で共通化を選べなくならないため）。ただし数値だけの値の除外は、名前が `PASSWORD` `PASSWD` `SECRET` `PIN` で終わるときは行わない（`PASSWORD=12345`。`PASSWORD_STORE_CLIP_TIME=45` は除く）。`$` の除外は、単一引用符で囲んだ値と `$'...'`（どちらも展開されない文字列）には行わない。
 - 設定ファイル形式の `キー: 値`、`キー = 値`、`"キー": "値"` で、キーが上と同じ条件に当たり、値も上と同じ除外に当たらないもの（`lib` の YAML / TOML / JSON のため）。コメントの行（`#` `;` で始まる。`//` で始まる行は `.npmrc` の `//registry.npmjs.org/:_authToken=...` があるのでコメントとみなさない）、`{` か `[` で始まる値、`""` で囲んだキーに `""` で囲んでいない値が付くもの（JSON の `null` など）は見ない。キー名のハイフン（`api-key`）は条件に当たらない（既知の制限）。plist は変更後の値だけで判定し、キーの名前は見ない。
 - `ghp_` `gho_` `github_pat_` `npm_` `glpat-` `AIza` `sk-` `sk_live_` `rk_live_` `xox?-` `AKIA` で始まる値、`Bearer <トークン>`（16 文字以上）、`_authToken=<値>`（8 文字以上。どちらも `$` で始まる値は除く。`.npmrc` の `_authToken=${NPM_TOKEN}` は普通の書き方のため）、`-----BEGIN ... PRIVATE KEY-----`。英数字と `_` 以外の文字の直後（`${GH_TOKEN:-ghp_...}` の `-` の後など）か行頭から始まり、ある程度の長さが続くものだけにする（`disk-` などに誤って反応しないため）。
 - URL の中の認証情報（`://<ユーザー>:<パスワード>@`。パスワードが `$` で始まるものは除く）。
