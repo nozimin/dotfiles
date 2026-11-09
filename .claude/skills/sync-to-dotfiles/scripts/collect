@@ -510,11 +510,22 @@ has_unclosed_block() {
   ' "$1"
 }
 
-# 段落がそれだけで構文として完結しているか。zsh -n が通り、ヒアドキュメントが閉じていれば真。
-# zsh -n は閉じていないヒアドキュメントを通すので、構文の誤りになる行（")"）を後ろに足しても通るかで確かめる
-# （閉じていなければ、足した行はヒアドキュメントの中身になる）。zsh の設定ファイルは読まない
+# 段落の最後の行（コメントと空行を除く）が、続きを待つ \ && || | で終わるか（zsh -n は、続きが無くても通す）。
+# \ は行の最後の文字のときだけ（"\ " はエスケープした空白）
+ends_with_continuation() {
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*(#|$)/ { next }
+    { last = $0 }
+    END { exit !(last ~ /\\$/ || last ~ /(&&|\|)[[:space:]]*$/) }
+  '
+}
+
+# 段落がそれだけで構文として完結しているか。zsh -n が通り、ヒアドキュメントが閉じていて、最後の行が続きを待つ
+# \ && || | で終わっていなければ真。zsh -n は閉じていないヒアドキュメントを通すので、構文の誤りになる行（")"）を
+# 後ろに足しても通るかで確かめる（閉じていなければ、足した行はヒアドキュメントの中身になる）。zsh の設定ファイルは読まない
 zsh_complete() {
   printf '%s\n' "$1" | zsh -f -n >/dev/null 2>&1 || return 1
+  ends_with_continuation "$1" && return 1
   case "$1" in
     *"<<"*) ! printf '%s\n)\n' "$1" | zsh -f -n >/dev/null 2>&1 ;;
   esac
@@ -532,15 +543,6 @@ control_only() {
     s ~ /(&&|\|\|)[[:space:]]*\{$/ || s ~ /^\(?[^()[:space:]]*\)$/ { next }
     { body = 1; exit }
     END { exit body }
-  '
-}
-
-# 段落の最後の行（コメントと空行を除く）が、続きを待つ \ && || | で終わるか（zsh -n は、続きが無くても通す）
-ends_with_continuation() {
-  printf '%s\n' "$1" | awk '
-    /^[[:space:]]*(#|$)/ { next }
-    { last = $0 }
-    END { sub(/[[:space:]]+$/, "", last); exit !(last ~ /(\\|&&|\|)$/) }
   '
 }
 
@@ -593,14 +595,15 @@ zsh_unit() {
   ')
   if [ "$dropped" -gt 0 ]; then
     control_only "$body" && return 0
-    [ "$4" = complete ] && { ! zsh_complete "$body" || ends_with_continuation "$body"; } && return 0
+    [ "$4" = complete ] && ! zsh_complete "$body" && return 0
   fi
   zsh_item "$1" "$range" "$body"
 }
 
 # collect_zsh <種類> <ファイル> [shellenv]
-# 段落は、構文として完結する（zsh_complete）まで次の段落とつなぐ（if や関数、ヒアドキュメントの中の空行で、
-# fi や } だけの断片や、閉じていないヒアドキュメントができないように）。brew shellenv の行は、つないだ後で除く
+# 段落は、構文として完結する（zsh_complete）まで次の段落とつなぐ（if や関数、ヒアドキュメントの中の空行や、
+# \ && || | で終わる行の後ろの空行で、fi や } だけの断片、閉じていないヒアドキュメント、続きの無い行ができないように）。
+# brew shellenv の行は、つないだ後で除く
 collect_zsh() {
   local kind="$1" file="$2" check=1 rec line gap para text="" start=""
   [ -f "$file" ] || return 0
@@ -615,7 +618,7 @@ collect_zsh() {
     # ブロックの手前かファイルの終わり。つないでいる途中なら、そこまでを 1 項目にする
     if [ -z "$rec" ]; then
       if [ -n "$text" ]; then
-        add_warning "~/.$kind の $start 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていない）ため、そこまでを 1 項目にしています"
+        add_warning "~/.$kind の $start 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていないか、最後の行が \ && || | で終わる）ため、そこまでを 1 項目にしています"
         zsh_unit "$kind" "$start" "$text" incomplete "$3"
         text=""
       fi
