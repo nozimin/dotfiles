@@ -78,6 +78,20 @@ case "$FAKE_SOFTWAREUPDATE" in
       '* Label: macOS 27.2-27C100' \
       '	Title: macOS 27.2, Version: 27.2, Size: 1234567KiB, Recommended: YES, Action: restart,'
     ;;
+  # 別のメジャー版だけ（インストール済みは 27.1）。Safari は古い macOS にも新しいメジャー版で配られる
+  other-major)
+    printf '%s\n' 'Software Update found the following new or updated software:' \
+      '* Label: macOS 28.1-28B50' \
+      '	Title: macOS 28.1, Version: 28.1, Size: 1234567KiB, Recommended: YES, Action: restart,' \
+      '* Label: Safari28.1-28.1' \
+      '	Title: Safari, Version: 28.1, Size: 123456KiB, Recommended: YES,'
+    ;;
+  # 題名の行の形が違い、バージョンを読めない
+  unreadable)
+    printf '%s\n' 'Software Update found the following new or updated software:' \
+      '* Label: macOS 27.2-27C100' \
+      '	Title: macOS 27.2 (Version 27.2) Size: 1234567KiB'
+    ;;
   empty) ;;
   fail)
     echo 'softwareupdate: 偽の失敗' >&2
@@ -382,6 +396,37 @@ for source in vscode npm; do
 done
 
 step "7. silent failure の経路（フィクスチャと偽のコマンド。ネットワークは使わない）"
+# cask API が 0 件 → warn（すべての .app が unmapped になって異常が隠れるため）
+echo '[]' >"$TMP/cask-empty.json"
+vulncheck VULNCHECK_BREW_CASK_URL="file://$TMP/cask-empty.json" latest --inventory "$INVENTORY"
+expect_status "cask-api: 0 件（[]）→ warn（他のソースは ok）" cask-api warn
+
+# softwareupdate に別のメジャー版へのアップグレードだけ → macOS は outdated: false で notes に書く。Safari は版を問わない
+vulncheck FAKE_SOFTWAREUPDATE=other-major latest --inventory "$INVENTORY"
+expect "softwareupdate: 別のメジャー版（macOS 28.1）だけ → ok、macOS は outdated: false、notes にアップグレード" \
+  'envelope("softwareupdate") | .status == "ok" and any(.notes[]; test("別のメジャー版.*macOS 28.1"))
+    and (item("macOS") | .outdated == false and .latest == "27.1" and .review == null)'
+expect "softwareupdate: Safari の新しいメジャー版（28.1）→ Safari は outdated" \
+  'envelope("softwareupdate") | item("Safari") | .outdated == true and .latest == "28.1"'
+
+# softwareupdate の題名やバージョンを読めない更新 → warn と、当たる項目に review（黙って捨てない）
+vulncheck FAKE_SOFTWAREUPDATE=unreadable latest --inventory "$INVENTORY"
+expect "softwareupdate: 読めない更新 → warn、macOS に review（最新版が分からない）、Safari はそのまま" \
+  'envelope("softwareupdate") | .status == "warn" and (.evidence.review == 1)
+    and (item("macOS") | .latest == null and (.review | test("最新版が分からない"))) and item("Safari").review == null'
+
+# MRI 以外の Ruby だけ → endoflife.date を引かないので 0 件でも ok、notes に理由
+jq 'map(if .source == "ruby" then .items = [{kind: "ruby", name: "jruby", version: "9.4.0.0", origin: "rbenv",
+  bundle_id: null, path: null, review: null}] else . end)' "$INVENTORY" >"$TMP/inventory-jruby.json"
+vulncheck latest --inventory "$TMP/inventory-jruby.json"
+expect "endoflife: MRI 以外の Ruby（jruby）だけ → ok + count 0、notes に理由、jruby は unmapped の review" \
+  'envelope("endoflife") | .status == "ok" and .count == 0 and any(.notes[]; test("MRI の Ruby が無い"))
+    and (item("jruby").review | test("unmapped"))'
+
+# OSV の GIT の範囲の値（コミットの SHA）は fixed に入れない。フィクスチャの lodash には SEMVER と GIT の範囲がある
+vulncheck osv --inventory "$INVENTORY"
+expect "osv: GIT の範囲の SHA が fixed に入らない（SEMVER の 4.17.21 だけ）" 'envelope("osv") | item("lodash").fixed == ["4.17.21"]'
+
 # 照合に使うインベントリが一部欠けた（warn で項目あり）。npm は osv、app は cask-api と itunes、すべては層1が照合に使う
 jq 'map(if .source == "npm" or .source == "app" then .status = "warn" | .notes = ["一部の取得に失敗しました（試験）"] else . end)' \
   "$INVENTORY" >"$TMP/inventory-partial.json"

@@ -738,13 +738,15 @@ layer2_osv() {
       files+=("$file")
     fi
   done <"$report"
-  # 詳細は「保存先 → 要点」の JSON にする（affected はパッケージと修正版だけ残す）
+  # 詳細は「保存先 → 要点」の JSON にする（affected はパッケージと修正版だけ残す）。
+  # 修正版は ECOSYSTEM と SEMVER の範囲だけから取る（GIT の範囲の値はコミットの SHA。§5.1）
   jq -n -c "$CVSS3_JQ"'[inputs | {key: input_filename, value: {
       aliases: (.aliases // []),
       summary: (.summary // (.details // "" | split("\n")[0] | .[:200] | select(. != "")) // null),
       severity: [.severity[]? | {type, score: (.score | cvss_score), vector: .score}],
       rating: (.database_specific.severity? // null),
-      affected: [.affected[]? | {package, fixed: [.ranges[]?.events[]? | .fixed? // empty]}]}}] | from_entries' \
+      affected: [.affected[]? | {package, fixed: [.ranges[]? | select(.type | IN("ECOSYSTEM", "SEMVER")) | .events[]?
+        | .fixed? // empty]}]}}] | from_entries' \
     ${files[@]+"${files[@]}"} </dev/null >"$details"
   text="$(jq -r --slurpfile details "$details" --arg dir "$WORK_DIR" \
     '[to_entries[] | select($details[0]["\($dir)/osv-vuln-\(.key).json"] == null) | .value] | join(", ")' "$ids")"
@@ -922,6 +924,10 @@ latest_cask() {
   fi
   fetch_source cask-api layer2 "$url" "$casks" --compressed || return 0
   count="$(jq -e 'if type == "array" then length else error("cask API の応答が配列ではありません") end' "$casks")"
+  if [ "$count" -eq 0 ]; then
+    status=warn
+    notes+=("0 件でした（すべての項目が unmapped になります）")
+  fi
   evidence="$(jq -c --argjson count "$count" '. + {casks: $count}' <<<"$evidence")"
   jq -c --slurpfile targets "$targets" --argjson installed "$installed" '
     def app_names: [.artifacts[]? | objects | select(has("app")) | .app
@@ -988,9 +994,13 @@ latest_itunes() {
 }
 
 # macOS 本体と Safari は softwareupdate --list に更新が出ているかで判定する（Safari だけの更新もある）。
-# 出ていれば outdated: true で、latest はその版（同じメジャーの更新を優先）。出ていなければ latest はインストール済みの版
+# 出ていれば outdated: true で、latest はその版。出ていなければ latest はインストール済みの版。
+# macOS はインストール済みと同じメジャー版の更新だけを見る。別のメジャー版へのアップグレードしか無ければ outdated: false で、
+# 補足に書く（同じメジャー版の修正はそのメジャー版の更新として配られる。§5.2）。Safari は古い macOS にも新しいメジャー版で
+# 修正が配られるので、版を問わない。題名やバージョンを読めない更新は warn にし、当たる項目の latest を null にする（review）
 latest_softwareupdate() {
-  local out="$WORK_DIR/softwareupdate.txt" err="$WORK_DIR/softwareupdate.err" entries text status=ok evidence parsed=true
+  local out="$WORK_DIR/softwareupdate.txt" err="$WORK_DIR/softwareupdate.err" items="$WORK_DIR/softwareupdate-items.json"
+  local entries text status=ok evidence parsed=true
   local notes=()
   ensure_inventory
   text="$(inventory_notes macos)"
@@ -1007,20 +1017,35 @@ latest_softwareupdate() {
     parsed=false
     notes+=("softwareupdate --list の出力を解釈できませんでした: $(cat "$out" "$err" | tr '\n' ' ' | cut -c 1-200)")
   fi
-  # 解釈できなかったときは更新の有無が分からないので latest と outdated を null にする
+  text="$(jq -r '[.[] | select(.version == null) | .label] | join(", ")' <<<"$entries")"
+  if [ -n "$text" ]; then
+    status=warn
+    notes+=("題名かバージョンを読めない更新があります（当たる項目は最新版が分からない）: $text")
+  fi
+  # 解釈できなかったときは更新の有無が分からないので latest と outdated を null にする。
+  # 読めない更新は題名（無ければラベル）で項目に当て、当たった項目の latest を null にする。upgrades は補足用（latest_result で落ちる）
   inventory_items macos | jq -c --argjson updates "$entries" --argjson parsed "$parsed" '
     def version_key: [splits("[^0-9]+")] | map(tonumber? // 0);
+    def major: split(".")[0];
     if $parsed | not then map({kind, name, installed: .version, latest: null, outdated: null, method: "softwareupdate", eol: null,
-      update_command: "システム設定 > 一般 > ソフトウェアアップデート", matched: null}) else
+      update_command: "システム設定 > 一般 > ソフトウェアアップデート", matched: null, upgrades: []}) else
     map(. as $t
-      | [$updates[] | select(.version != null and (.title // "" | test(if $t.name == "Safari" then "^Safari" else "^macOS" end)))] as $candidates
-      | [$candidates[] | select((.version | split(".")[0]) == (($t.version // "") | split(".")[0]))] as $same_major
-      | (if ($same_major | length) > 0 then $same_major else $candidates end | sort_by(.version | version_key) | last) as $update
-      | {kind, name, installed: .version, latest: ($update.version // .version), outdated: ($update != null),
+      | (if $t.name == "Safari" then "^Safari" else "^macOS" end) as $prefix
+      | [$updates[] | select(.version != null and (.title // "" | test($prefix)))] as $candidates
+      | (if $t.name == "Safari" then $candidates else [$candidates[] | select((.version | major) == ($t.version // "" | major))] end) as $same
+      | [$updates[] | select(.version == null and (.title // .label | test($prefix)))] as $unreadable
+      | ($same | sort_by(.version | version_key) | last) as $update
+      | {kind, name, installed: .version,
+         latest: (if ($unreadable | length) > 0 then null else ($update.version // .version) end),
+         outdated: (if $update then true elif ($unreadable | length) > 0 then null else false end),
          method: "softwareupdate", eol: null,
          update_command: (if $update then "softwareupdate --install \"\($update.label)\"" else "システム設定 > 一般 > ソフトウェアアップデート" end),
-         matched: $update.label}) end' |
-    latest_result softwareupdate "$status" "$(jq length <<<"$entries")" "$evidence" ${notes[@]+"${notes[@]}"}
+         matched: $update.label, upgrades: [($candidates - $same)[].title]}) end' >"$items"
+  text="$(jq -r '[.[].upgrades[]] | unique | join(", ")' "$items")"
+  if [ -n "$text" ]; then
+    notes+=("別のメジャー版へのアップグレードがある（インストール済みのメジャー版の更新ではないので outdated にしない）: $text")
+  fi
+  latest_result softwareupdate "$status" "$(jq length <<<"$entries")" "$evidence" ${notes[@]+"${notes[@]}"} <"$items"
 }
 
 # rbenv の Ruby は endoflife.date で同じサイクル（3.3 など）の最新パッチと EOL を取る。ruby 以外（jruby など）は unmapped
@@ -1034,13 +1059,18 @@ latest_endoflife() {
   evidence="$(jq -nc --arg url "$url" '{url: $url}')"
   if jq -e 'any(.[]; .name == "ruby")' "$targets" >/dev/null; then
     fetch_source endoflife layer2 "$url" "$out" || return 0
+    count="$(jq -e 'if type == "array" then length else error("endoflife.date の応答が配列ではありません") end' "$out")"
+    if [ "$count" -eq 0 ]; then
+      status=warn
+      notes+=("0 件でした")
+    fi
   else
+    # 照合する MRI が無ければ引かない。取得しなかったので 0 件でも ok（§5.2）
     echo '[]' >"$out"
-  fi
-  count="$(jq -e 'if type == "array" then length else error("endoflife.date の応答が配列ではありません") end' "$out")"
-  if [ "$count" -eq 0 ] && [ "$(jq length "$targets")" -gt 0 ]; then
-    status=warn
-    notes+=("0 件でした")
+    text="$(jq -r '[.[] | "\(.name) \(.version)"] | join(", ")' "$targets")"
+    if [ -n "$text" ]; then
+      notes+=("MRI の Ruby が無いため endoflife.date を引いていません（MRI 以外: ${text}）")
+    fi
   fi
   evidence="$(jq -c --argjson count "$count" '. + {cycles: $count}' <<<"$evidence")"
   today="$(now_iso)"

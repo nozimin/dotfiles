@@ -6,7 +6,9 @@
   "database_specific": {"severity": "HIGH"},
   "affected": [
     {"package": {"name": "lodash", "ecosystem": "npm"},
-     "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]},
+     "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]},
+                {"type": "GIT", "repo": "https://github.com/lodash/lodash",
+                 "events": [{"introduced": "0"}, {"fixed": "3469357cff396a26c363f8c1b5a91dde28ba4b1c"}]}]},
     {"package": {"name": "lodash-es", "ecosystem": "npm"},
      "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]}
   ]
