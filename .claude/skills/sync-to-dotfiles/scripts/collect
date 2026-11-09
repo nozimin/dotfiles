@@ -131,14 +131,57 @@ has_missing_path() {
   return 1
 }
 
-# 秘密情報らしい名前の変数への代入があるか。行を単語に分け、コマンドの先頭と export などの引数にある
-# NAME=値 だけを代入とみなす（alias の定義や [[ ... == ... ]] の比較は代入ではない）。
-# $ で始まる値（別の変数やコマンドの結果）と空の値は除く。コメントアウトした代入も数える（# を区切りとして扱う）
+# 秘密情報らしい名前の変数への代入か、設定ファイル形式のキーと値があるか。
+# 代入は、行を単語に分け、コマンドの先頭と export などの引数にある NAME=値 だけとみなす（alias の定義や
+# [[ ... == ... ]] の比較は代入ではない）。コメントアウトした代入も数える（# を区切りとして扱う）。
+# 値が $ で始まるもの（別の変数やコマンドの結果）、空の値、パス、真偽値や数値だけの値は除く
 has_secret_assignment() {
   printf '%s\n' "$1" | awk '
     function secret_name(n) {
       n = toupper(n)
       return n ~ /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL/ || n ~ /_KEY$/
+    }
+    # SSH_KEY=~/.ssh/id_rsa や TOKENIZERS_PARALLELISM=false のような値は秘密情報ではない
+    function secret_value(v) {
+      return v != "" && v !~ /^[$~\/]/ && tolower(v) !~ /^(true|false|yes|no|on|off|[0-9]+)$/
+    }
+    # 先頭の引用符で囲んだ文字列の中身（閉じていなければ最後まで）
+    function unquote(s,   q, i, c, v) {
+      q = substr(s, 1, 1); v = ""
+      for (i = 2; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == q) break
+        if (c == "\\" && q == "\"") c = substr(s, ++i, 1)
+        v = v c
+      }
+      return v
+    }
+    # 設定ファイル形式（YAML の キー: 値、TOML と ini の キー = 値、JSON の "キー": "値"）のキーと値か。
+    # コメントの行は見ない（説明の文に反応しないように）。"" で囲んだキーは "" で囲んだ値だけを見る
+    # （JSON の { や null に反応しないように）。囲んでいないキーの { や [ で始まる値も、中身なので見ない
+    function config_pair(s,   rest, pair, head, sep, key, value) {
+      if (s ~ /^[[:space:]]*(#|;|\/\/)/) return 0
+      # JSON の "キー": "値" は、1 行に複数あってもよい
+      rest = s
+      while (match(rest, /"[^"]*"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/)) {
+        pair = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+        key = unquote(pair); sub(/^"[^"]*"[[:space:]]*:[[:space:]]*/, "", pair)
+        if (secret_name(key) && secret_value(unquote(pair))) return 1
+      }
+      # 行頭の キー: 値 と キー = 値（YAML の "- " の後ろも見る）
+      if (!match(s, /^[[:space:]]*(-[[:space:]]+)?([[:alpha:]_][[:alnum:]_.-]*|"[^"]*"|\047[^\047]*\047)[[:space:]]*[:=]/)) return 0
+      head = substr(s, 1, RLENGTH - 1); sep = substr(s, RLENGTH, 1); rest = substr(s, RLENGTH + 1)
+      # 空白の無い NAME=値 はシェルの代入なので、代入として調べる（TOKENS=(a b) の配列などに反応しないように）
+      if (sep == "=" && head ~ /^[[:space:]]*[[:alpha:]_][[:alnum:]_]*$/) return 0
+      # YAML の : の後ろには空白が要る（https://... などに反応しないように）
+      if (sep == ":" && rest !~ /^([[:space:]]|$)/) return 0
+      key = head; sub(/^[[:space:]]*(-[[:space:]]+)?/, "", key); sub(/[[:space:]]+$/, "", key)
+      sub(/^[[:space:]]+/, "", rest)
+      if (rest ~ /^["\047]/) value = unquote(rest)
+      else if (key ~ /^["\047]/ || rest ~ /^(\[|\{)/) return 0
+      else { value = rest; sub(/(^|[[:space:]])#.*/, "", value); sub(/[[:space:],]+$/, "", value) }
+      if (key ~ /^["\047]/) key = unquote(key)
+      return secret_name(key) && secret_value(value)
     }
     # state: 0 はコマンドの先頭、1 は export などの引数、2 はコマンドの引数（代入ではない）
     function word(w,   name, value) {
@@ -146,7 +189,7 @@ has_secret_assignment() {
       if (match(w, /^[[:alpha:]_][[:alnum:]_]*\+?=/)) {
         name = substr(w, 1, RLENGTH - 1); sub(/\+$/, "", name)
         value = substr(w, RLENGTH + 1); gsub(/["\047]/, "", value)
-        if (value != "" && value !~ /^\$/ && secret_name(name)) found = 1
+        if (secret_name(name) && secret_value(value)) found = 1
       }
       else if (state == 0 && w ~ /^(export|typeset|declare|local|readonly|integer|float|env)$/) state = 1
       # then などの後ろは、まだコマンドの先頭。export などのオプションと値の無い変数名の後ろは、まだ引数
@@ -155,6 +198,7 @@ has_secret_assignment() {
       else state = 2
     }
     {
+      if (config_pair($0)) { found = 1; exit }
       state = 0; w = ""; q = ""
       for (i = 1; i <= length($0); i++) {
         c = substr($0, i, 1)
