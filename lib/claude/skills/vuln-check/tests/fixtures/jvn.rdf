@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xml:lang="ja">
+ <channel rdf:about="https://jvn.jp/rss/jvn.rdf">
+  <title>JVN</title>
+  <link>https://jvn.jp/</link>
+  <description>Japan Vulnerability Notes</description>
+  <dc:date>2026-11-09T14:45:14+09:00</dc:date>
+  <items>
+   <rdf:Seq>
+          <rdf:li rdf:resource="https://jvn.jp/jp/JVN00000002/" />
+          <rdf:li rdf:resource="https://jvn.jp/vu/JVNVU00000003/" />
+          <rdf:li rdf:resource="https://jvn.jp/jp/JVN00000001/" />
+   </rdf:Seq>
+  </items>
+ </channel>
+ <item rdf:about="https://jvn.jp/jp/JVN00000002/">
+  <title>Mozilla Firefox における解放済みメモリの使用の脆弱性</title>
+  <link>https://jvn.jp/jp/JVN00000002/</link>
+  <description>Mozilla Firefox には、解放済みメモリの使用の脆弱性が存在します。</description>
+  <dc:publisher>JVN</dc:publisher>
+  <dc:identifier>JVN#00000002</dc:identifier>
+  <dc:date>2026-11-05T15:00:00+09:00</dc:date>
+  <dcterms:issued>2026-11-05T15:00:00+09:00</dcterms:issued>
+  <dcterms:modified>2026-11-05T15:00:00+09:00</dcterms:modified>
+ </item>
+ <item rdf:about="https://jvn.jp/vu/JVNVU00000003/">
+  <title>Example Router OS における OS コマンドインジェクションの脆弱性</title>
+  <link>https://jvn.jp/vu/JVNVU00000003/</link>
+  <description>Example Router OS には、OS コマンドインジェクションの脆弱性が存在します。</description>
+  <dc:publisher>JVN</dc:publisher>
+  <dc:identifier>JVNVU#00000003</dc:identifier>
+  <dc:date>2026-11-09T14:45:14+09:00</dc:date>
+  <dcterms:issued>2026-11-02T12:00:00+09:00</dcterms:issued>
+  <dcterms:modified>2026-11-09T14:45:14+09:00</dcterms:modified>
+ </item>
+ <item rdf:about="https://jvn.jp/jp/JVN00000001/">
+  <title>Example Mail Gateway におけるパストラバーサルの脆弱性</title>
+  <link>https://jvn.jp/jp/JVN00000001/</link>
+  <description>Example Mail Gateway には、パストラバーサルの脆弱性が存在します。</description>
+  <dc:publisher>JVN</dc:publisher>
+  <dc:identifier>JVN#00000001</dc:identifier>
+  <dc:date>2026-10-30T12:00:00+09:00</dc:date>
+  <dcterms:issued>2026-10-30T12:00:00+09:00</dcterms:issued>
+  <dcterms:modified>2026-10-30T12:00:00+09:00</dcterms:modified>
+ </item>
+</rdf:RDF>

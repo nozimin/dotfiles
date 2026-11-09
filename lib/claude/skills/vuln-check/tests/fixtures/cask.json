@@ -1,0 +1,7 @@
+[
+  {"token": "claude-code", "version": "2.1.0", "deprecated": false, "disabled": false, "artifacts": [{"binary": ["claude"]}]},
+  {"token": "firefox", "version": "145.0", "deprecated": false, "disabled": false,
+   "artifacts": [{"app": ["Firefox.app"]}, {"zap": [{"trash": ["~/Library/Caches/Firefox"]}]}]},
+  {"token": "firefox@beta", "version": "146.0b3", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Firefox.app"]}]},
+  {"token": "example-latest", "version": "latest", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Example Latest.app"]}]}
+]

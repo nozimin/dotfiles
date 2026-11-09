@@ -1,0 +1,327 @@
+#!/bin/bash
+# vuln-check の scripts/vulncheck の試験。仕様は docs/specs/vuln-check.md の §12。
+# 全項目の結果を表示し、1 つでも失敗すれば終了コード 1。
+# 外部ソースは fixtures/ のファイル（file://）と偽のコマンドに差し替える。ネットワークを使うのは 3 だけ。
+# vulncheck は、PATH を偽のコマンドと OS 付属のものだけにした環境で実行する（この Mac の brew や npm などを呼ばない）。
+# shellcheck disable=SC2016 # 単一引用符の中の $ は jq の変数
+
+set -uo pipefail
+
+TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+VULNCHECK="$(cd "$TESTS_DIR/../scripts" && pwd -P)/vulncheck"
+FIXTURES="$TESTS_DIR/fixtures"
+INVENTORY="$FIXTURES/inventory.json"
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/vulncheck-test.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+FAKE_BIN="$TMP/bin"
+# 存在しない URL と、空のファイルを置いたディレクトリ（ベース URL のソースは読むパスに空のファイルを置く）
+MISSING="file://$TMP/missing"
+EMPTY="$TMP/empty"
+OUT="$TMP/out" ERR="$TMP/err" RC=0
+
+if [ -t 1 ]; then
+  C_BLUE=$'\033[1;34m' C_GREEN=$'\033[1;32m' C_RED=$'\033[1;31m' C_RESET=$'\033[0m'
+else
+  C_BLUE='' C_GREEN='' C_RED='' C_RESET=''
+fi
+
+PASSED=0
+FAILED=()
+
+step() { printf '\n%s==> %s%s\n' "$C_BLUE" "$*" "$C_RESET"; }
+pass() {
+  PASSED=$((PASSED + 1))
+  printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$1"
+}
+
+# fail <説明> [詳細...]
+fail() {
+  FAILED+=("$1")
+  printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$1"
+  shift
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$@" | sed 's/^/    /'
+  fi
+}
+
+# 既定の差し替え先。現在時刻は、層1のフィクスチャの最も新しい日付から 14 日経たない時刻に固定する
+BASE_ENV=(
+  VULNCHECK_OSV_URL="file://$FIXTURES/osv"
+  VULNCHECK_BREW_FORMULA_URL="file://$FIXTURES/formula"
+  VULNCHECK_BREW_CASK_URL="file://$FIXTURES/cask.json"
+  VULNCHECK_ITUNES_URL="file://$FIXTURES/itunes.json"
+  VULNCHECK_EOL_URL="file://$FIXTURES/endoflife"
+  VULNCHECK_KEV_URL="file://$FIXTURES/kev.json"
+  VULNCHECK_JVN_IPEDIA_URL="file://$FIXTURES/jvndb_new.rdf"
+  VULNCHECK_JVN_URL="file://$FIXTURES/jvn.rdf"
+  VULNCHECK_JPCERT_URL="file://$FIXTURES/jpcert.rdf"
+  VULNCHECK_VSCODE_REMOVED_URL="file://$FIXTURES/RemovedPackages.md"
+  VULNCHECK_NOW=2026-11-10T12:00:00+09:00
+  FAKE_SOFTWAREUPDATE=none
+)
+
+# 偽のコマンド。softwareupdate は FAKE_SOFTWAREUPDATE で振る舞いを選ぶ。
+# code と npm は 6 の inventory で使い、バージョンの無い項目を 1 つずつ出す
+make_fake_commands() {
+  mkdir -p "$FAKE_BIN" "$TMP/home"
+  cat >"$FAKE_BIN/softwareupdate" <<'EOF'
+#!/bin/bash
+case "$FAKE_SOFTWAREUPDATE" in
+  none)
+    printf '%s\n' 'Software Update Tool' '' 'Finding available software'
+    echo 'No new software available.' >&2
+    ;;
+  update)
+    printf '%s\n' 'Software Update Tool' '' 'Finding available software' \
+      'Software Update found the following new or updated software:' \
+      '* Label: macOS 27.2-27C100' \
+      '	Title: macOS 27.2, Version: 27.2, Size: 1234567KiB, Recommended: YES, Action: restart,'
+    ;;
+  empty) ;;
+  fail)
+    echo 'softwareupdate: 偽の失敗' >&2
+    exit 1
+    ;;
+esac
+EOF
+  cat >"$FAKE_BIN/code" <<'EOF'
+#!/bin/bash
+printf '%s\n' ms-python.python@2026.1.0 example.no-version
+EOF
+  cat >"$FAKE_BIN/npm" <<'EOF'
+#!/bin/bash
+echo '{"dependencies": {"lodash": {"version": "4.17.15"}, "example-no-version": {}}}'
+EOF
+  chmod +x "$FAKE_BIN"/*
+}
+
+# 空のファイル。ベース URL のソース（OSV、formula、endoflife）は読むパスに置く
+make_empty_files() {
+  mkdir -p "$EMPTY/osv/v1" "$EMPTY/formula" "$EMPTY/endoflife" "$TMP/osv-no-details/v1"
+  : >"$EMPTY/file"
+  : >"$EMPTY/osv/v1/querybatch"
+  : >"$EMPTY/formula/jq.json"
+  : >"$EMPTY/endoflife/ruby.json"
+  # querybatch には該当があるが、詳細（v1/vulns/<id>）が無い
+  cp "$FIXTURES/osv/v1/querybatch" "$TMP/osv-no-details/v1/querybatch"
+}
+
+# vulncheck [変数=値...] <サブコマンド> [引数...]
+# BASE_ENV に「変数=値」を上書きした環境で vulncheck を実行する。標準出力は $OUT、標準エラーは $ERR、終了コードは $RC
+vulncheck() {
+  local vars=()
+  while [[ ${1:-} == *=* ]]; do
+    vars+=("$1")
+    shift
+  done
+  RC=0
+  env -i HOME="$TMP/home" PATH="$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$TMP" LANG="${LANG:-C}" \
+    "${BASE_ENV[@]}" ${vars[@]+"${vars[@]}"} "$VULNCHECK" "$@" >"$OUT" 2>"$ERR" || RC=$?
+}
+
+# 失敗したときに表示する、直前の出力の要点（エンベロープごとの状態と補足、標準エラーの末尾）
+output_summary() {
+  jq -r '.[]? | "\(.layer)/\(.source): \(.status)（count \(.count)）\(.notes | join(" / "))"' "$OUT" 2>/dev/null | cut -c 1-300
+  tail -n 3 "$ERR"
+}
+
+# 条件の中で使う jq の定義。envelope はソースのエンベロープ（1 つだけのはず）、item はエンベロープの中の名前の項目
+JQ_DEFS='
+  def envelope($source): [.[] | select(.source == $source)] | if length == 1 then .[0] else error("\($source) が \(length) 個") end;
+  def item($name): first(.items[] | select(.name == $name or .id == $name));
+'
+
+# expect <説明> <jq の条件> [jq の引数...]
+# 直前の vulncheck が終了コード 0 で、出力が条件を満たせば成功
+expect() {
+  local name="$1" filter="$2"
+  shift 2
+  if [ "$RC" -eq 0 ] && jq -e "$@" "$JQ_DEFS$filter" "$OUT" >/dev/null 2>&1; then
+    pass "$name"
+  else
+    fail "$name" "終了コード $RC" "$(output_summary)"
+  fi
+}
+
+# expect_status <説明> <ソース> <状態>
+# ソースのエンベロープの状態が <状態> で、同じ出力の他のソースはすべて ok（1 つの失敗が他を止めない）
+expect_status() {
+  expect "$1" 'envelope($source).status == $status and all(.[] | select(.source != $source); .status == "ok")' \
+    --arg source "$2" --arg status "$3"
+}
+
+# inject <ソース> <環境変数> <空のファイルの URL> <サブコマンド> [引数...]
+# 存在しない URL に向けると error、空のファイルに向けると warn
+inject() {
+  local source="$1" var="$2" empty="$3"
+  shift 3
+  vulncheck "$var=$MISSING" "$@"
+  expect_status "$source: 存在しない URL → error（他のソースは ok）" "$source" error
+  vulncheck "$var=$empty" "$@"
+  expect_status "$source: 空のファイル → warn（他のソースは ok）" "$source" warn
+}
+
+# expect_compare <A> <B> <lt|eq|gt|終了コード 2>
+expect_compare() {
+  local got
+  vulncheck compare "$1" "$2"
+  if [ "$RC" -eq 0 ]; then
+    got="$(cat "$OUT")"
+  else
+    got="終了コード $RC"
+  fi
+  if [ "$got" = "$3" ]; then
+    pass "compare '$1' '$2' → $3"
+  else
+    fail "compare '$1' '$2' → $3" "結果: $got $(tail -n 1 "$ERR")"
+  fi
+}
+
+# freshness <ソース> <1 秒前> <14 日後> <1 秒後> <period.from> <period.to> <newest> <サブコマンド> [引数...]
+# 最も新しい日付（newest）の 14 日後の 1 秒前なら ok、ちょうど 14 日後と、その 1 秒後なら warn。
+# いずれも取得できた期間が evidence.period に、鮮度の判定に使った日付が evidence.newest に入っている
+freshness() {
+  local source="$1" before="$2" boundary="$3" after="$4" from="$5" to="$6" newest="$7" now status
+  shift 7
+  for now in "$before" "$boundary" "$after"; do
+    if [ "$now" = "$before" ]; then
+      status=ok
+    else
+      status=warn
+    fi
+    vulncheck VULNCHECK_NOW="$now" "$@"
+    expect "$source: VULNCHECK_NOW=$now → $status" 'envelope($source).status == $status' \
+      --arg source "$source" --arg status "$status"
+  done
+  expect "$source: evidence.period は ${from} 〜 ${to}、evidence.newest は ${newest}" \
+    'envelope($source).evidence | .period == {from: $from, to: $to} and .newest == $newest' \
+    --arg source "$source" --arg from "$from" --arg to "$to" --arg newest "$newest"
+}
+
+make_fake_commands
+make_empty_files
+
+step "1. shellcheck"
+if ! command -v shellcheck >/dev/null 2>&1; then
+  fail "shellcheck が見つかりません（brew install shellcheck）"
+elif output="$(shellcheck "$VULNCHECK" "$TESTS_DIR/run" 2>&1)"; then
+  pass "scripts/vulncheck と tests/run に警告がない"
+else
+  fail "scripts/vulncheck と tests/run に警告がない" "$output"
+fi
+
+step "2. 故障注入（フィクスチャと偽の softwareupdate。ネットワークは使わない）"
+vulncheck osv --inventory "$INVENTORY"
+expect "osv: フィクスチャ → ok" 'envelope("osv") | .status == "ok" and item("lodash").id == "GHSA-35jh-r3h4-6jhm"'
+inject osv VULNCHECK_OSV_URL "file://$EMPTY/osv" osv --inventory "$INVENTORY"
+vulncheck VULNCHECK_OSV_URL="file://$TMP/osv-no-details" osv --inventory "$INVENTORY"
+expect_status "osv: 詳細（v1/vulns/<id>）だけ取得できない → warn" osv warn
+
+vulncheck latest --inventory "$INVENTORY"
+for source in brew-api cask-api itunes softwareupdate endoflife; do
+  expect "$source: フィクスチャ → ok" 'envelope($source) | .status == "ok" and .evidence.checked > 0' --arg source "$source"
+done
+inject brew-api VULNCHECK_BREW_FORMULA_URL "file://$EMPTY/formula" latest --inventory "$INVENTORY"
+inject cask-api VULNCHECK_BREW_CASK_URL "file://$EMPTY/file" latest --inventory "$INVENTORY"
+inject itunes VULNCHECK_ITUNES_URL "file://$EMPTY/file" latest --inventory "$INVENTORY"
+inject endoflife VULNCHECK_EOL_URL "file://$EMPTY/endoflife" latest --inventory "$INVENTORY"
+vulncheck FAKE_SOFTWAREUPDATE=update latest --inventory "$INVENTORY"
+expect_status "softwareupdate: 更新あり → ok" softwareupdate ok
+expect "softwareupdate: 更新あり → macOS は outdated" 'envelope("softwareupdate") | item("macOS") | .outdated == true and .latest == "27.2"'
+vulncheck FAKE_SOFTWAREUPDATE=fail latest --inventory "$INVENTORY"
+expect_status "softwareupdate: 偽のコマンドが失敗 → error（他のソースは ok）" softwareupdate error
+vulncheck FAKE_SOFTWAREUPDATE=empty latest --inventory "$INVENTORY"
+expect_status "softwareupdate: 偽のコマンドの出力が空 → warn（他のソースは ok）" softwareupdate warn
+
+vulncheck kev --inventory "$INVENTORY"
+expect "kev: フィクスチャ → ok" 'envelope("kev") | .status == "ok" and .count == 3
+  and any(.items[]; .cve == "CVE-2026-0002" and .matched == ["app Firefox"])'
+inject kev VULNCHECK_KEV_URL "file://$EMPTY/file" kev --inventory "$INVENTORY"
+
+vulncheck jvn --inventory "$INVENTORY"
+for source in jvn-ipedia jvn; do
+  expect "$source: フィクスチャ → ok" 'envelope($source) | .status == "ok" and .count == 3
+    and any(.items[]; .matched == ["app Firefox"])' --arg source "$source"
+done
+inject jvn-ipedia VULNCHECK_JVN_IPEDIA_URL "file://$EMPTY/file" jvn --inventory "$INVENTORY"
+inject jvn VULNCHECK_JVN_URL "file://$EMPTY/file" jvn --inventory "$INVENTORY"
+
+vulncheck jpcert
+expect "jpcert: フィクスチャ → ok（Weekly Report を除く注意喚起だけ）" \
+  'envelope("jpcert") | .status == "ok" and .count == 4 and ([.items[].id] == ["at260002", "at260001"])'
+inject jpcert VULNCHECK_JPCERT_URL "file://$EMPTY/file" jpcert
+
+vulncheck vscode --inventory "$INVENTORY"
+expect "vscode: フィクスチャ → ok（大文字小文字を区別せずに一致）" \
+  'envelope("vscode") | .status == "ok" and .count == 3 and .items == [{id: "example.removed-extension", version: "1.0.0",
+    removal_date: "2026-11-03", type: "Malware"}]'
+inject vscode VULNCHECK_VSCODE_REMOVED_URL "file://$EMPTY/file" vscode --inventory "$INVENTORY"
+
+step "3. 既知の陽性（ネットワークが必要: api.osv.dev に問い合わせる）"
+vulncheck VULNCHECK_OSV_URL=https://api.osv.dev osv --inventory "$INVENTORY"
+expect "[ネットワーク] osv: npm lodash@4.17.15 → 脆弱性を返す（GHSA-35jh-r3h4-6jhm / CVE-2021-23337 を含む）" \
+  'envelope("osv") | .status == "ok"
+    and any(.items[]; .name == "lodash" and .id == "GHSA-35jh-r3h4-6jhm" and (.aliases | index("CVE-2021-23337")))'
+
+step "4. compare"
+expect_compare 1.9.5 1.10.0 lt
+expect_compare 1.10.0 1.9.5 gt
+expect_compare 156.0.8078.9 156.0.8078.81 lt
+expect_compare 77.1 77.1_1 lt
+expect_compare '5.10.2 GM (b5299, 5a516b44)' 5.10.2 eq
+expect_compare v1.0 1.0.0 eq
+expect_compare 2026-10-20 2026-10-21 lt
+expect_compare 1.2.3-beta 1.2.3 lt
+expect_compare 1.2.3 1.2.3-beta gt
+expect_compare 1.2.3-alpha 1.2.3-beta '終了コード 2'
+expect_compare abc 1.0 '終了コード 2'
+expect_compare 1.0 '' '終了コード 2'
+
+step "5. 層1の鮮度（フィクスチャ。ネットワークは使わない）"
+# KEV はカタログの dateReleased（dateAdded の最大の 2026-11-04 より新しい）
+freshness kev 2026-11-20T19:44:44Z 2026-11-20T19:44:45Z 2026-11-20T19:44:46Z \
+  2026-10-01 2026-11-04 2026-11-06T19:44:45.1797Z kev --inventory "$INVENTORY"
+# JVN iPedia と JVN は項目の日付（dc:date）の最大。RSS の先頭の項目ではない
+freshness jvn-ipedia 2026-11-23T15:11:59+09:00 2026-11-23T15:12:00+09:00 2026-11-23T15:12:01+09:00 \
+  2026-11-07T09:00+09:00 2026-11-09T15:12+09:00 2026-11-09T15:12+09:00 jvn --inventory "$INVENTORY"
+freshness jvn 2026-11-23T14:45:13+09:00 2026-11-23T14:45:14+09:00 2026-11-23T14:45:15+09:00 \
+  2026-10-30T12:00:00+09:00 2026-11-09T14:45:14+09:00 2026-11-09T14:45:14+09:00 jvn --inventory "$INVENTORY"
+# JPCERT/CC は Weekly Report を含む RSS 全体の日付の最大。期間は注意喚起だけの範囲
+freshness jpcert 2026-11-19T09:51:59+09:00 2026-11-19T09:52:00+09:00 2026-11-19T09:52:01+09:00 \
+  2026-10-26T16:25+09:00 2026-10-29T15:43+09:00 2026-11-05T09:52+09:00 jpcert
+
+step "6. 項目ごとの要確認（フィクスチャと偽の code / npm。ネットワークは使わない）"
+vulncheck latest --inventory "$FIXTURES/inventory-review.json"
+expect "brew-api: homebrew/core 以外の tap（unmapped）→ ok のまま、その項目に review、evidence.review は 1" \
+  'envelope("brew-api") | .status == "ok" and .evidence.review == 1
+    and (item("example-tool") | .method == "unmapped" and (.review | test("unmapped"))) and item("jq").review == null'
+expect "cask-api: unmapped、バージョン不明、比較不能（latest）→ ok のまま、その項目に review、evidence.review は 3" \
+  'envelope("cask-api") | .status == "ok" and .evidence.review == 3
+    and (item("Example Unknown") | .method == "unmapped" and (.review | test("unmapped")))
+    and (item("claude-code") | .installed == null and (.review | test("不明")))
+    and (item("Example Latest") | .outdated == null and (.review | test("比べられない")))
+    and item("Firefox").review == null'
+expect "itunes: App Store に無いアプリ（unmapped）→ ok のまま、その項目に review、evidence.review は 1" \
+  'envelope("itunes") | .status == "ok" and .evidence.review == 1
+    and (item("Example Delisted").review | test("unmapped")) and item("Keynote").review == null'
+expect "endoflife: ruby 以外（jruby、unmapped）→ ok のまま、その項目に review、evidence.review は 1" \
+  'envelope("endoflife") | .status == "ok" and .evidence.review == 1
+    and (item("jruby").review | test("unmapped")) and item("ruby").review == null'
+
+# inventory はこの Mac の /Applications と sw_vers も読む（読み取りだけ）。確かめるのは偽のコマンドの kind だけ
+vulncheck inventory
+for source in vscode npm; do
+  expect "inventory $source: バージョン不明の項目 → ok のまま、その項目に review、evidence.review は 1" \
+    'envelope($source) | .status == "ok" and .count == 2 and .evidence.review == 1
+      and (.items | map(select(.review != null)) | length == 1 and .[0].version == null and (.[0].review | test("バージョン不明")))' \
+    --arg source "$source"
+done
+
+step "まとめ"
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  printf '%s✗%s %d 件中 %d 件が失敗しました:\n' "$C_RED" "$C_RESET" "$((PASSED + ${#FAILED[@]}))" "${#FAILED[@]}"
+  printf '    %s\n' "${FAILED[@]}"
+  exit 1
+fi
+printf '%s✓%s %d 件すべて成功しました\n' "$C_GREEN" "$C_RESET" "$PASSED"

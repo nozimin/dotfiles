@@ -1,0 +1,4 @@
+[
+  {"cycle": "3.4", "releaseDate": "2024-12-24", "eol": "2028-03-31", "latest": "3.4.12", "latestReleaseDate": "2026-10-23", "lts": false},
+  {"cycle": "3.3", "releaseDate": "2023-12-25", "eol": "2027-03-31", "latest": "3.3.10", "latestReleaseDate": "2026-03-26", "lts": false}
+]

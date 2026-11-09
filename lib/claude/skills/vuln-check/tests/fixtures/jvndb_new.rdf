@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:sec="http://jvn.jp/rss/mod_sec/" xml:lang="ja">
+  <channel rdf:about="https://jvndb.jvn.jp/ja/rss/jvndb_new.rdf">
+    <title>JVNDB RSS Feed - New Entry</title>
+    <link>https://jvndb.jvn.jp/</link>
+    <description>JVN iPedia 新着情報</description>
+    <dc:date>2026-11-09T17:00:28+09:00</dc:date>
+    <items>
+      <rdf:Seq>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000002.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000003.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000001.html"/>
+      </rdf:Seq>
+    </items>
+  </channel>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000002.html">
+    <title>Mozilla Firefox における解放済みメモリの使用の脆弱性</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000002.html</link>
+    <description>Mozilla Firefox には、解放済みメモリの使用の脆弱性が存在します。&lt;ul&gt;&lt;li&gt;CVE-2026-0002&lt;/li&gt;&lt;/ul&gt;</description>
+    <sec:identifier>JVNDB-2026-000002</sec:identifier>
+    <sec:references source="CVE" id="CVE-2026-0002">https://www.cve.org/CVERecord?id=CVE-2026-0002</sec:references>
+    <sec:cpe version="2.2" vendor="Mozilla Foundation" product="Mozilla Firefox">cpe:/a:mozilla:firefox</sec:cpe>
+    <sec:cvss version="3.0" score="8.8" type="Base" severity="High" vector="CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"/>
+    <dc:date>2026-11-08T10:30+09:00</dc:date>
+    <dcterms:issued>2026-11-08T10:30+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-08T10:30+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000003.html">
+    <title>Example Router OS における OS コマンドインジェクションの脆弱性</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000003.html</link>
+    <description>Example Router OS には、OS コマンドインジェクションの脆弱性が存在します。</description>
+    <sec:identifier>JVNDB-2026-000003</sec:identifier>
+    <sec:references source="CVE" id="CVE-2026-0003">https://www.cve.org/CVERecord?id=CVE-2026-0003</sec:references>
+    <sec:cpe version="2.2" vendor="Example" product="Example Router OS">cpe:/o:example:router_os</sec:cpe>
+    <sec:cvss version="3.0" score="9.8" type="Base" severity="Critical" vector="CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"/>
+    <dc:date>2026-11-09T15:12+09:00</dc:date>
+    <dcterms:issued>2026-11-09T15:12+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-09T15:12+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000001.html">
+    <title>Example Mail Gateway におけるパストラバーサルの脆弱性</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000001.html</link>
+    <description>Example Mail Gateway には、パストラバーサルの脆弱性が存在します。</description>
+    <sec:identifier>JVNDB-2026-000001</sec:identifier>
+    <sec:references source="CVE" id="CVE-2026-0001">https://www.cve.org/CVERecord?id=CVE-2026-0001</sec:references>
+    <sec:cpe version="2.2" vendor="Example" product="Example Mail Gateway">cpe:/a:example:mail_gateway</sec:cpe>
+    <dc:date>2026-11-07T09:00+09:00</dc:date>
+    <dcterms:issued>2026-11-07T09:00+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-07T09:00+09:00</dcterms:modified>
+  </item>
+</rdf:RDF>

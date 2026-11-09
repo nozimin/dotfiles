@@ -1,0 +1,1 @@
+{"name": "jq", "tap": "homebrew/core", "versions": {"stable": "1.8.1", "head": "HEAD", "bottle": true}, "revision": 0}
