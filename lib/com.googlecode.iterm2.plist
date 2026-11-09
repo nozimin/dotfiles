@@ -1214,7 +1214,7 @@
 				<real>0.19802422821521759</real>
 			</dict>
 			<key>Log Directory</key>
-			<string>/Users/nozimin/Documents/terminal_logs</string>
+			<string>~/Documents/terminal_logs</string>
 			<key>Mouse Reporting</key>
 			<false/>
 			<key>Name</key>
