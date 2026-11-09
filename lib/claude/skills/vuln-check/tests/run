@@ -264,18 +264,35 @@ expect "[ネットワーク] osv: npm lodash@4.17.15 → 脆弱性を返す（GH
   'envelope("osv") | .status == "ok"
     and any(.items[]; .name == "lodash" and .id == "GHSA-35jh-r3h4-6jhm" and (.aliases | index("CVE-2021-23337")))'
 
-step "4. compare"
+step "4. compare（§7）"
 expect_compare 1.9.5 1.10.0 lt
 expect_compare 1.10.0 1.9.5 gt
 expect_compare 156.0.8078.9 156.0.8078.81 lt
 expect_compare 77.1 77.1_1 lt
+expect_compare 2026-10-20 2025-02-25 gt
+expect_compare 2026-10-20 2026-10-21 lt
 expect_compare '5.10.2 GM (b5299, 5a516b44)' 5.10.2 eq
 expect_compare v1.0 1.0.0 eq
-expect_compare 2026-10-20 2026-10-21 lt
+expect_compare 1.0.0-1 1.0.0 gt
+# プレリリースの印は、同じ位置の数字や版の終わりより小さい
 expect_compare 1.2.3-beta 1.2.3 lt
 expect_compare 1.2.3 1.2.3-beta gt
-expect_compare 1.2.3-alpha 1.2.3-beta '終了コード 2'
+expect_compare 1.0.0rc1 1.0.0 lt
+expect_compare 2.0.0a1 2.0.0 lt
+expect_compare 7.1.0.beta1 7.1.0 lt
+expect_compare 1.0.0.pre 1.0 lt
+expect_compare 1.2.3-alpha 1.2.3-beta lt
+expect_compare 1.0.0rc1 1.0.0rc2 lt
+# それ以外の英字はリリース後の印（1 文字の a b c も、直後に数字が無ければこちら）
+expect_compare 9.9p1 9.9p2 lt
+expect_compare 1.1.1t 1.1.1w lt
+expect_compare 2025a 2025b lt
+expect_compare 1.0 1.0p1 lt
+expect_compare 1.1.1a 1.1.1 gt
+# 比較不能
 expect_compare abc 1.0 '終了コード 2'
+expect_compare 9e08eb8f78fd 1.0 '終了コード 2'
+expect_compare 8.0.0 9e08eb8f78fd '終了コード 2'
 expect_compare 1.0 '' '終了コード 2'
 
 step "5. 層1の鮮度（フィクスチャ。ネットワークは使わない）"

@@ -225,58 +225,92 @@ parse_inventory_option() {
     die "--inventory のファイルが inventory の出力の形ではありません: $INVENTORY_FILE"
 }
 
-# version_parts <バージョン>
-# 比較に使う「数字部分 プレリリースの接尾辞」を 1 行で出す（§7）。接尾辞が無ければ数字部分と空白だけ。
-# 数字部分は . 区切りにし、各要素の先頭の 0 と末尾の .0 は落とす（1.0 と 1.0.0 を等しくする）。
-# 例: 5.10.2 GM (b5299) → 5.10.2、77.1_1 → 77.1.1、2026-10-20 → 2026.10.20、2.0.0-rc.1 → 2 -rc.1
-# 数字で始まらなければ 1 を返す。
-version_parts() {
-  local re='^[[:space:]]*[vV]?([0-9]+([._-][0-9]+)*)(-[A-Za-z][^[:space:]]*)?' part key="" pre
-  [[ $1 =~ $re ]] || return 1
-  pre="${BASH_REMATCH[3]:-}"
-  for part in ${BASH_REMATCH[1]//[._-]/ }; do
-    part="${part#"${part%%[!0]*}"}"
-    key="$key.${part:-0}"
-  done
-  key="${key#.}"
-  while [[ $key == *.0 ]]; do
-    key="${key%.0}"
-  done
-  printf '%s %s\n' "$key" "$pre"
-}
+# バージョン比較（§7）の awk。ARGV[1] と ARGV[2] を比べて lt / eq / gt を出す。比べられなければメッセージを出して 2 で終わる。
+# 版を「数字の並び」と「英字の並び」の要素に分け、先頭から 1 つずつ比べる（9.9p1 は 9 9 p 1、1.0.0rc1 は 1 0 0 rc 1）。
+# 同じ位置の要素の大小: プレリリースの印 < 版の終わり < それ以外の英字（リリース後の印）< 数字。
+# 版の終わりは数字の 0 と同じに扱う（1.0 eq 1.0.0）。印どうしは順位で、英字どうしは辞書順で、数字どうしは数として比べる
+VERSION_AWK='
+  # 版 s を要素に分け、種別（pre / post / num）を kind[i] に、値を value[i] に入れて要素の数を返す。
+  # 比べられなければ理由を why に入れて -1 を返す
+  function parse(s, kind, value,    n, chunks, count, i, rest, len, token) {
+    sub(/^[ \t]+/, "", s)
+    sub(/^[vV]/, "", s)
+    # 最初の空白か ( から後ろは捨てる（5.10.2 GM (b5299, …) は 5.10.2）
+    sub(/[ \t(].*$/, "", s)
+    s = tolower(s)
+    if (s == "") { why = "空"; return -1 }
+    if (s !~ /[0-9]/) { why = "数字を含まない"; return -1 }
+    if (s ~ /[^0-9a-z._+-]/) { why = "区切り（. - _ +）以外の記号がある"; return -1 }
+    n = 0
+    count = split(s, chunks, /[._+-]/)
+    for (i = 1; i <= count; i++) {
+      rest = chunks[i]
+      if (length(rest) >= 7 && rest ~ /^[0-9a-f]+$/ && rest ~ /[a-f]/) { why = "コミットの SHA のような 16 進の並び"; return -1 }
+      while (rest != "") {
+        n++
+        if (match(rest, /^[0-9]+/)) {
+          len = RLENGTH
+          token = substr(rest, 1, len)
+          # 先頭の 0 を落とした数字の並び（0 は空）
+          sub(/^0+/, "", token)
+          kind[n] = "num"
+          value[n] = token
+        } else {
+          match(rest, /^[a-z]+/)
+          len = RLENGTH
+          token = substr(rest, 1, len)
+          # 1 文字の a b c は、直後に数字が続くときだけ印とする（2025a や 1.1.1a は印ではない）
+          if ((token in RANK) && (length(token) > 1 || substr(rest, len + 1) ~ /^[0-9]/)) {
+            kind[n] = "pre"
+            value[n] = RANK[token]
+          } else {
+            kind[n] = "post"
+            value[n] = token
+          }
+        }
+        rest = substr(rest, len + 1)
+      }
+    }
+    return n
+  }
+  function order(k) { return k == "pre" ? 1 : (k == "end" ? 2 : (k == "post" ? 3 : 4)) }
+  function compare_values(k, x, y) {
+    if (k == "pre") { x += 0; y += 0 }
+    else if (k == "num" && length(x) != length(y)) return length(x) < length(y) ? -1 : 1
+    else { x = x ""; y = y "" }
+    return x < y ? -1 : (x > y ? 1 : 0)
+  }
+  function fail(s) {
+    printf "vulncheck: 比べられないバージョンです（%s）: %s\n", why, s > "/dev/stderr"
+    exit 2
+  }
+  BEGIN {
+    RANK["dev"] = 0
+    RANK["alpha"] = RANK["a"] = 1
+    RANK["beta"] = RANK["b"] = 2
+    RANK["pre"] = RANK["preview"] = RANK["c"] = RANK["rc"] = 3
+    na = parse(ARGV[1], ka, va)
+    if (na < 0) fail(ARGV[1])
+    nb = parse(ARGV[2], kb, vb)
+    if (nb < 0) fail(ARGV[2])
+    r = 0
+    for (i = 1; r == 0 && (i <= na || i <= nb); i++) {
+      x = i <= na ? ka[i] : "end"
+      y = i <= nb ? kb[i] : "end"
+      if (x == "end" && y == "num") x = "num"
+      if (y == "end" && x == "num") y = "num"
+      if (x != y) r = order(x) < order(y) ? -1 : 1
+      else r = compare_values(x, va[i], vb[i])
+    }
+    print (r < 0 ? "lt" : (r > 0 ? "gt" : "eq"))
+  }
+'
 
 # version_compare <A> <B>
-# A<B なら lt、等しければ eq、A>B なら gt を出す。数字部分が等しければプレリリースの側を小さいとする。
-# 数字として解釈できないときと、接尾辞の異なるプレリリースどうし（1.2.3-alpha と 1.2.3-beta）はメッセージを出して 2 を返す。
+# A<B なら lt、等しければ eq、A>B なら gt を出す（§7。規則は VERSION_AWK）。
+# 空、数字を含まない、区切り以外の記号がある、コミットの SHA のような並びがあるときは、メッセージを出して 2 を返す。
 version_compare() {
-  local a b a_pre b_pre sorted
-  a="$(version_parts "$1")" || {
-    printf 'vulncheck: 数字として解釈できないバージョンです: %s\n' "$1" >&2
-    return 2
-  }
-  b="$(version_parts "$2")" || {
-    printf 'vulncheck: 数字として解釈できないバージョンです: %s\n' "$2" >&2
-    return 2
-  }
-  a_pre="${a#* }" a="${a%% *}"
-  b_pre="${b#* }" b="${b%% *}"
-  if [ "$a" != "$b" ]; then
-    sorted="$(printf '%s\n%s\n' "$a" "$b" | sort -V)"
-    if [ "${sorted%%$'\n'*}" = "$a" ]; then
-      echo lt
-    else
-      echo gt
-    fi
-  elif [ "$a_pre" = "$b_pre" ]; then
-    echo eq
-  elif [ -z "$a_pre" ]; then
-    echo gt
-  elif [ -z "$b_pre" ]; then
-    echo lt
-  else
-    printf 'vulncheck: プレリリースどうしの順序は比べられません: %s と %s\n' "$1" "$2" >&2
-    return 2
-  fi
+  awk "$VERSION_AWK" "$1" "$2"
 }
 
 # --- inventory（§4） ---
