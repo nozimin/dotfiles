@@ -51,7 +51,11 @@ iTerm2 の手順は iTerm2 を終了しないと実行できないので、Termi
 
 「ローカル専用」にした項目は除外リスト `~/.config/dotfiles/ignore` に追記され、次から表に出なくなる。Mac ごとのファイルで、リポジトリには入れない。
 
-- 1 行に 1 つ、項目の `id`（`brew:actionlint`、`zshrc:alias gcomi=...` のような `<種類>:<識別子>`）をそのまま書く。`id` は `.claude/skills/sync-to-dotfiles/scripts/collect` を実行すると見られる。
+- 1 行に 1 つ、項目の `id` をそのまま書く。`id` は `<種類>:<識別子>` の形で、`.claude/skills/sync-to-dotfiles/scripts/collect` を実行すると見られる。
+  - Brewfile の項目: 名前（`brew:actionlint`。サードパーティの tap のものは `brew:<user>/<tap>/<名前>` の完全な名前）
+  - `~/.zshrc` / `~/.zprofile` の段落: コメントでない行を、前後の空白を除いて ` ⏎ `（前後に空白）でつないだもの（`zshrc:alias gcomi=...`、`zprofile:if command -v rbenv >/dev/null 2>&1; then ⏎ eval "$(rbenv init - zsh)" ⏎ fi`）。段落の中身が変わると `id` も変わり、また表に出る。
+  - 秘密情報を含む段落: 上の文字列の SHA-256（`zshrc:sha256:<SHA-256>` のような形。秘密情報をファイルに書き写さないため）
+  - `lib/` の変更: `lib:<リポジトリからの相対パス>`
 - 空行と `#` で始まる行は無視される。
 - 行を消すと、その項目はまた表に出る。
 
@@ -75,7 +79,7 @@ lib/
 
 ## ツールを追加する
 
-- **インストールだけ**: `lib/Brewfile` に `brew "<name>"` か `cask "<name>"` を1行足す。
+- **インストールだけ**: `lib/Brewfile` に `brew "<name>"` か `cask "<name>"` を1行足す。サードパーティの tap のものは `<user>/<tap>/<name>` の完全な名前で書く（短い名前だと、新しい Mac の `brew bundle` が失敗する）。
 - **設定も必要**:
   1. 設定ファイルを `lib/` に置く。
   2. `cmd/setup` に `setup_<tool>` 関数を足し、末尾の手順の並びに呼び出しを足す。
