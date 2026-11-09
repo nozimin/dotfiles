@@ -46,7 +46,7 @@ Claude Code で `/vuln-check` と打つ。手動実行専用で、Claude が自�
 | 対象 | 照合の方法 |
 |---|---|
 | brew の formula と、.app を持たない cask（`claude-code` など） | formulae.brew.sh の最新版と比べる |
-| `/Applications` のアプリ | App Store のものは iTunes Lookup、それ以外は brew の cask の最新版と比べる（brew で入れたかは問わない） |
+| `/Applications` と `~/Applications` のアプリ（サブフォルダの中も 3 階層まで） | App Store のものは iTunes Lookup、それ以外は brew の cask の最新版と比べる（brew で入れたかは問わない） |
 | macOS（Safari を含む） | `softwareupdate --list` |
 | Ruby 本体（rbenv） | endoflife.date の同じサイクルの最新パッチと EOL |
 | npm / pnpm のグローバルパッケージ、uv のツール、gem（rbenv の各 Ruby） | OSV.dev |

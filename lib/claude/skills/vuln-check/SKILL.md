@@ -99,6 +99,8 @@ jq -c '.[] | select(.layer == "layer2" and (.source | IN("brew-api", "cask-api",
   - NVD の画面（`nvd.nist.gov/vuln/detail/...`）は WebFetch では中身が取れない。CVE の内容、影響範囲、スコアは `https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<CVE>` か `https://cveawg.mitre.org/api/cve/<CVE>` で読む。
   - Chrome Releases のブログも WebFetch では本文が取れない。`https://chromereleases.googleblog.com/feeds/posts/default/-/Stable%20updates?alt=json&max-results=6` で読む。
 - `macos` は `softwareupdate --list` に更新が出ているものが `outdated: true` になる。Apple のセキュリティアップデートの一覧（<https://support.apple.com/ja-jp/100100>）で、その更新の修正内容を調べる。
+  - macOS は、インストール済みと同じメジャー版の更新だけが `outdated: true` になる。別のメジャー版へのアップグレード（例: 26.7.2 に対する macOS 27.2）しか出ていなければ `outdated: false` のままで、`notes` にそのアップグレードが書かれる。指摘にはせず、参考に書く。
+  - 題名やバージョンを読めない更新があると、エンベロープは `warn` になり、当たる項目は `latest: null` と `review`（最新版が分からない）になる。`notes` のラベルと Apple の一覧から更新の版を調べる。
 - ランタイム本体（`ruby` など）は、インストール済みから最新版までの各リリースノートに書かれた CVE を指摘にする（同梱の gem の修正も含む）。
 - `review` の付いた項目（`unmapped`、バージョン不明、比較不能）は、ベンダーのページで最新版を調べる。インベントリと層2の両方に出る対象（バージョン不明の Steam など）は 1 つとして扱う。全エンベロープの `review` の項目は次で一覧にできる。
 
