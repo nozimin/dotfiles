@@ -40,13 +40,13 @@
 
 - brew コマンドは `HOMEBREW_NO_AUTO_UPDATE=1` で呼ぶ。brew が無ければ `brew` `cask` `tap` を飛ばし、`warn` を出す。
 - 逆向きの差分も出す: Brewfile にあるのにインストールされていないもの。`brew` はインストール済みかを `brew list --formula`（依存として入ったものも含む）で判定する。
-- `brew` と `cask` は名前の最後の `/` より後ろで比べる（tap のフォーミュラは完全な名前と短い名前が混ざるため）。`tap` は名前全体で比べる。`homebrew/core` と `homebrew/cask` は出さない。Brewfile の完全な名前の行（`brew "user/tap/foo"`）から暗黙に追加される tap は、Brewfile にあるものとして扱う。
+- `brew` と `cask` は名前の最後の `/` より後ろで比べる（tap のフォーミュラは完全な名前と短い名前が混ざるため）。`tap` は名前全体で比べる。`homebrew/core` と `homebrew/cask` は出さない。Brewfile の完全な名前の行（`brew "user/tap/foo"`）から暗黙に追加される tap は、Brewfile にあるものとして扱う（ローカル側の項目を出さないためだけに使い、逆向きの差分には出さない。消せる `tap` の行が無いため）。
 - dotfiles 側（`lib/Brewfile` と `lib/zshrc`）は `HEAD` の内容と比べる（`git show HEAD:<パス>`）。作業ツリーの未コミットの変更は `lib` の項目として別に出る。作業ツリーと比べると、未コミットの変更にしかない行が「dotfiles にある」と判定され、その変更を破棄したときに設定がどこにも残らなくなるため。
 - サードパーティの tap のもの（`homebrew/core` と `homebrew/cask` 以外）は、`body` と `id` に完全な名前（`<user>/<tap>/<名前>`。`brew list --formula --installed-on-request --full-name` / `brew list --cask --full-name`）を出す。Brewfile に短い名前で書くと、新しい Mac の `brew bundle` が失敗するため。
 - dotfiles ブロック: `# >>> dotfiles` で始まる行から `# <<< dotfiles` で始まる行まで（`dotfiles: homebrew` のような名前付きも含む）。閉じていなければ開始行から最後までを除き、`warn` を出す。
-- `zprofile` では `brew shellenv` を含む行も除く（dotfiles ブロック導入前に追記されたもの）。その行を除いた残りが `zsh -n` を通らないか、制御構文の行（`if` `then` `else` `fi` `{` `}` など）とコメントだけになる段落は、段落ごと除く（`if ...; then eval "$(brew shellenv)"; fi` から中身のない `if` が出ないため）。
+- `zprofile` では `brew shellenv` を含む行も除く（dotfiles ブロック導入前に追記されたもの）。その行を除いた残りが `zsh -n` を通らないか、制御構文の行（`if` `then` `else` `fi` `{` `}` など）とコメントだけになる段落は、段落ごと除く（`if ...; then eval "$(brew shellenv)"; fi` から中身のない `if` が出ないため）。段落をつなぐかは `brew shellenv` の行を含めた元の内容で決め、行を除くのはつないだ後にする。`lines` は除いた後の最初の行から最後の行まで（途中の `brew shellenv` の行は範囲に入る）。
 - `zshrc` と `zprofile` は、空行で区切った「段落」を 1 項目にする。空行には空白だけの行も含めるが、100 文字以上の空白だけの行は段落に残す（§6 の `garbage`）。dotfiles ブロックも段落の区切りになる。コメントだけの段落と空の段落は出さない。
-- 段落がそれだけで構文として完結しない（`zsh -n` が通らない）ときは、通るまで次の段落とつなぐ（`if` や関数の中の空行で、`fi` や `}` だけの断片ができないようにするため）。閉じていないヒアドキュメント（`<<EOF` などの終わりの行がまだ無い）も、`zsh -n` が通っても完結していないものとして、終わりの行までつなぐ（`zsh -n` は閉じていないヒアドキュメントを通すため）。dotfiles ブロックを越えてはつながない。ファイルの最後か dotfiles ブロックの手前までつないでも通らなければ、そこまでを 1 項目にして `warn` を出す。
+- 段落がそれだけで構文として完結しない（`zsh -n` が通らない）ときは、通るまで次の段落とつなぐ（`if` や関数の中の空行で、`fi` や `}` だけの断片ができないようにするため）。閉じていないヒアドキュメント（`<<EOF` などの終わりの行がまだ無い）と、最後のコメントでない行が `\` `&&` `||` `|` で終わる段落も、`zsh -n` が通っても完結していないものとしてつなぐ（`zsh -n` はファイルの終わりでこれらを通すため）。dotfiles ブロックを越えてはつながない。ファイルの最後か dotfiles ブロックの手前までつないでも通らなければ、そこまでを 1 項目にして `warn` を出す。
 - VS Code の拡張機能（Brewfile の `vscode` 行）は、VS Code を §9 で取り込むときに collect に追加する。今は扱わない。
 
 ## 5. collect の出力形式
@@ -69,6 +69,7 @@ body:
 === item
 kind: zshrc
 id: zshrc:alias gcomi='(){~/Script/cmd/commit $1}'
+lines: 3-3
 direction: local
 flags: missing-path
 body:
@@ -84,10 +85,10 @@ ignored: 1
 - `=== item`: 差分 1 件。
   - `kind`: §4 の種類。
   - `id`: 除外リスト（§7）で使う識別子。`<kind>:<識別子>` の形。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落のコメントでない行を前後の空白を除いて ` ⏎ ` でつないだもの（1 行の段落ならその行。段落の中身が変われば別の項目として扱う）、`lib` はリポジトリからの相対パス。`secret` が立つ `zshrc` `zprofile` の項目は、秘密情報を除外リストに書き写さないよう `<kind>:sha256:<上の文字列の SHA-256>` にする（末尾に改行を付けない文字列から求める）。
+  - `lines`: `zshrc` `zprofile` だけ。`id` の次の行に出す。段落がファイルの何行目から何行目か（`lines: 12-15`。1 から数える）。skill はこの範囲でローカルの段落を消す（同じ内容の段落が複数あっても取り違えないため）。
   - `direction`: `local`（ローカルにだけある）、`dotfiles`（dotfiles にだけある）、`changed`（`lib/` の未コミットの変更）のどれか。
   - `flags`: §6 のフラグを、§6 の表の順にカンマ区切りで。無ければ `-`。
-  - `lines`: `zshrc` `zprofile` だけ。段落がファイルの何行目から何行目か（`lines: 12-15`。1 から数える）。skill はこの範囲でローカルの段落を消す（同じ内容の段落が複数あっても取り違えないため）。
-  - `body:` の後: 本文。各行の先頭に 4 スペースを付ける。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落の全文、`lib` は §5.1 の要約。`secret` が立つ項目は、秘密と判定した値を `***` に置き換える（表に載せたときにチャットや transcript に残さないため）。
+  - `body:` の後: 本文。各行の先頭に 4 スペースを付ける。`brew` `cask` `tap` は名前、`zshrc` `zprofile` は段落の全文、`lib` は §5.1 の要約。`secret` が立つ項目は、秘密と判定した値を `***` に置き換える（表に載せたときにチャットや transcript に残さないため）。`lib` の diff では、足された行だけでなく、消された行と前後の文脈の行も同じ条件で置き換える。
 - `=== warn`: 確認できなかったこと（1 行 1 件）。無ければブロックを出さない。
 - `=== summary`: `items`（出した項目数）と `ignored`（除外リストで除いた数）。
 - オプション: `--no-fetch`（`git fetch` しない。`behind` と `ahead` はローカルの追跡ブランチで数える）。
@@ -118,9 +119,9 @@ ignored: 1
 
 `secret` の条件は次のどれか:
 
-- 変数への代入（行の中の `NAME=値` の形の単語。`export` `sudo` `env` の引数、`;` `{` `then` `if` の後なども含む。`alias` の直後の単語と `[[ ... == ... ]]` の比較は代入ではない）で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）、空の値、パス（`~` か `/` で始まる）、真偽値や数値だけの値（`true` `false` `yes` `no` `0` など）は除く（`SSH_KEY=~/.ssh/id_rsa` や `TOKENIZERS_PARALLELISM=false` や `MAX_TOKENS=4096` で共通化を選べなくならないため）。ただし数値だけの値の除外は、名前が `PASSWORD` `PASSWD` `SECRET` を含むときは行わない（`PASSWORD=12345`）。`$` の除外は、単一引用符で囲んだ値（`'$abc123'` は展開されない文字列）には行わない。
+- 変数への代入（行の中の `NAME=値` の形の単語。`export` `sudo` `env` の引数、`;` `{` `then` `if` の後なども含む。`alias` の引数（次の `;` `&` `|` `(` `)` `#` まで）と `[[ ... ]]` の中は代入ではない）で、変数名が `TOKEN` `SECRET` `PASSWORD` `PASSWD` `API_KEY` `APIKEY` `PRIVATE_KEY` `CREDENTIAL` を含むか、`_KEY` で終わるもの（大文字小文字は区別しない）。値が `$` で始まるもの（`"$(gh auth token)"` など）、空の値、パス（`~` か `/` で始まる）、真偽値や数値だけの値（`true` `false` `yes` `no` `0` など）は除く（`SSH_KEY=~/.ssh/id_rsa` や `TOKENIZERS_PARALLELISM=false` や `MAX_TOKENS=4096` で共通化を選べなくならないため）。ただし数値だけの値の除外は、名前が `PASSWORD` `PASSWD` `SECRET` を含むときは行わない（`PASSWORD=12345`）。`$` の除外は、単一引用符で囲んだ値（`'$abc123'` は展開されない文字列）には行わない。
 - 設定ファイル形式の `キー: 値`、`キー = 値`、`"キー": "値"` で、キーが上と同じ条件に当たり、値も上と同じ除外に当たらないもの（`lib` の YAML / TOML / JSON のため）。コメントの行（`#` `;` で始まる。`//` で始まる行は `.npmrc` の `//registry.npmjs.org/:_authToken=...` があるのでコメントとみなさない）、`{` か `[` で始まる値、`""` で囲んだキーに `""` で囲んでいない値が付くもの（JSON の `null` など）は見ない。キー名のハイフン（`api-key`）は条件に当たらない（既知の制限）。plist は変更後の値だけで判定し、キーの名前は見ない。
-- `ghp_` `gho_` `github_pat_` `npm_` `glpat-` `AIza` `sk-` `sk_live_` `rk_live_` `xox?-` `AKIA` で始まる値、`Bearer <トークン>`、`_authToken=<値>`、`-----BEGIN ... PRIVATE KEY-----`。単語の先頭で、ある程度の長さが続くものだけにする（`disk-` などに誤って反応しないため）。
+- `ghp_` `gho_` `github_pat_` `npm_` `glpat-` `AIza` `sk-` `sk_live_` `rk_live_` `xox?-` `AKIA` で始まる値、`Bearer <トークン>`（16 文字以上）、`_authToken=<値>`（8 文字以上。どちらも `$` で始まる値は除く。`.npmrc` の `_authToken=${NPM_TOKEN}` は普通の書き方のため）、`-----BEGIN ... PRIVATE KEY-----`。単語の先頭で、ある程度の長さが続くものだけにする（`disk-` などに誤って反応しないため）。
 - URL の中の認証情報（`://<ユーザー>:<パスワード>@`。パスワードが `$` で始まるものは除く）。
 
 複数のフラグが立ったときは `secret` > `in-dotfiles` > `missing-path` > `home-path` の順に優先する。`garbage` は、おすすめとは別に「取り込むときにその行を消す」という但し書きとして扱う。
