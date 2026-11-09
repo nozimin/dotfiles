@@ -23,7 +23,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 ```
 
 - `cmd/setup` の `setup_claude_skills` が `lib/claude/skills/*/` を skill ごとに `~/.claude/skills/<名前>` へシンボリックリンクする（§11）。
-- `scripts/vulncheck` は bash で書き、shellcheck を警告なしで通す。依存は OS 付属のもの（`bash` `curl` `jq` `xmllint` `PlistBuddy` `sort -V` など）と、インベントリ対象のツール自身（`brew` `npm` など）だけ。Python は使わない。
+- `scripts/vulncheck` は bash で書き、shellcheck を警告なしで通す。依存は OS 付属のもの（`bash` `curl` `jq` `xmllint` `PlistBuddy` `awk` `find` など）と、インベントリ対象のツール自身（`brew` `npm` など）だけ。Python は使わない。
 
 ## 3. `scripts/vulncheck` の共通仕様
 
@@ -145,7 +145,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 
 - エンベロープは取得元ごとに出し、`source` は `method` と同じ名前（`brew-api` / `cask-api` / `itunes` / `softwareupdate` / `endoflife`）。`count` は取得元から読み取った件数（formula の JSON の数、cask の全件数、iTunes の結果の件数、softwareupdate の更新の件数、endoflife のサイクルの数）、照合した件数は `evidence.checked`。
 - `macos` は `compare` を使わず、`softwareupdate --list` に出ていれば `outdated: true` とする（`27.2 (a)` のような Rapid Security Response は `compare` では区別できないため）。
-  - 対象はインストール済みと同じメジャー版の更新だけ。別のメジャー版へのアップグレード（例: 26.7.2 に対する macOS 27.2）しか出ていないときは `outdated: false` のままにし、`notes` に「別のメジャー版へのアップグレードがある」と書く（同じメジャー版の修正は、そのメジャー版の更新として配られるため）。
+  - macOS 本体は、インストール済みと同じメジャー版の更新だけを対象にする（Safari は除く。Safari は古い macOS 向けにも新しいメジャー版でセキュリティ修正が配られるので、メジャー版で絞らない）。別のメジャー版へのアップグレード（例: 26.7.2 に対する macOS 27.2）しか出ていないときは `outdated: false` のままにし、`notes` に「別のメジャー版へのアップグレードがある」と書く（同じメジャー版の修正は、そのメジャー版の更新として配られるため）。
   - `* Label:` の行があるのに、その更新の題名やバージョンを読めないときは、エンベロープを `warn` にし、該当する項目に `review`（「最新版が分からない」）を付ける。読めない更新を黙って捨てない。
 - `latest` の各取得元で、読み取った件数が 0 なら `warn`（§3.2）。cask API が 0 件のときも同じ（すべての .app が `unmapped` になり、異常が隠れるため）。ただし照合する項目が 1 つも無いために取得そのものをしなかったとき（例: rbenv に MRI 以外の Ruby（jruby など）しか無く、endoflife.date を引かなかった）は `ok` にし、`notes` にその理由を書く。
 - 対応付けできなかった項目は `method: "unmapped"`、`latest: null` として出し、§3.1 の項目ごとの要確認（`review`）にする。バージョン不明や比較不能の項目も同じ。エンベロープの `status` は変えない。AI がベンダーのページで最新版を調べる（§8.2）。
@@ -178,7 +178,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 - **それ以外の英字**（`p`、`t`、`w` など）は、リリース後の印として「版の終わり」より大きく、英字どうしは辞書順で比べる（`9.9p1 lt 9.9p2`、`1.1.1t lt 1.1.1w`、`2025a lt 2025b`、`1.0 lt 1.0p1`）。同じ位置で数字と英字が並んだら数字を大きいとする。
 - **末尾の 0**: 版の終わりの `0` の要素は無視する（`1.0 eq 1.0.0`）。
 - **区切りの `-` の後ろの数字**は、プレリリースではなく続きの要素として扱う（brew の revision `77.1_1`、日付の `2026-10-20`、`1.0.0-1 gt 1.0.0`）。semver の数字だけのプレリリース（`1.0.0-0`）は扱わない。
-- **比較不能**（終了コード 2。呼び出し側は「比較不能」として扱い、要確認にする）: 数字を 1 つも含まない入力、コミットの SHA のような 7 文字以上の 16 進の並び（`9e08eb8f…`）、空の入力。
+- **比較不能**（終了コード 2。呼び出し側は「比較不能」として扱い、要確認にする）: 数字を 1 つも含まない入力、コミットの SHA のような並び（区切りの間の 7 文字以上の 16 進で、`a`〜`f` を 1 つ以上含むもの。`9e08eb8f…`。数字だけの `20261020` は当たらない）、区切り（`.` `-` `_` `+`）以外の記号（`~` `,` `:` など）を含む入力、空の入力。印に無い英字（`SNAPSHOT`、`nightly` など）はリリース後の英字として扱う。
 - `sort -V` は使わない（上の規則を実装するのに足りない）。`awk` で比べてよい。
 
 ## 8. skill の手順（SKILL.md）
