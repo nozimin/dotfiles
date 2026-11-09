@@ -63,7 +63,12 @@ setup_starship() {
     ok "starship の設定はリンク済み"
     return
   fi
-  link_file "$src" "$dest" || skip "starship"
+  link_file "$src" "$dest"
+  case $? in
+    0) ;;
+    2) skip "starship" ;;
+    *) fail "starship" "退避かリンクの作成に失敗しました" ;;
+  esac
 }
 
 # iTerm2 の設定を lib/com.googlecode.iterm2.plist から読み込み、変更を自動で保存する
@@ -164,6 +169,11 @@ setup_claude_skills() {
     # lib/claude/skills/ が無いか空のときは、パターンがそのまま残る
     [ -d "$dir" ] || continue
     found=1
+    if [ -L "$HOME/.claude/skills" ]; then
+      # リンク先（このリポジトリ、別のチェックアウト、古い場所など）の中身を退避で動かしてしまうので、何もしない
+      fail "Claude skills" "~/.claude/skills が $(pretty_path "$(readlink "$HOME/.claude/skills")") へのリンクです。実際のディレクトリに置き換えてから再実行してください"
+      return
+    fi
     src="${dir%/}"
     name="${src##*/}"
     dest="$HOME/.claude/skills/$name"
@@ -172,8 +182,8 @@ setup_claude_skills() {
       continue
     fi
     if [ ! -L "$dest" ] && [ "$dest" -ef "$src" ]; then
-      # ~/.claude/skills ごとリポジトリを指していると、退避でリポジトリの中身を動かしてしまう
-      fail "Claude skill $name" "~/.claude/skills が lib/claude/skills を指しています。skill ごとのリンクに置き換えてから再実行してください"
+      # ~/.claude ごとリポジトリを指しているときも、退避でリポジトリの中身を動かしてしまう
+      fail "Claude skill $name" "$(pretty_path "$dest") はリポジトリの lib/claude/skills/$name そのものです。~/.claude がリポジトリを指していないか確かめてください"
       continue
     fi
     if [ -e "$dest" ] && [ ! -L "$dest" ]; then
@@ -181,7 +191,12 @@ setup_claude_skills() {
       # shellcheck disable=SC2012 # 表示するだけ
       ls -lA "$dest" | sed 's/^/    /'
     fi
-    link_file "$src" "$dest" "$HOME/.claude/skills-backup" || skip "Claude skill $name"
+    link_file "$src" "$dest" "$HOME/.claude/skills-backup"
+    case $? in
+      0) ;;
+      2) skip "Claude skill $name" ;;
+      *) fail "Claude skill $name" "退避かリンクの作成に失敗しました" ;;
+    esac
   done
   [ -n "$found" ] || ok "lib/claude/skills/ にリンクする skill はありません"
 }
