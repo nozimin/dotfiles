@@ -79,6 +79,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 | `VULNCHECK_VSCODE_REMOVED_URL` | `https://raw.githubusercontent.com/microsoft/vsmarketplace/main/RemovedPackages.md` |
 
 `VULNCHECK_NOW`（ISO 8601）で「現在時刻」を差し替えられる（層1の鮮度の判定の試験用）。
+`VULNCHECK_APP_DIRS`（`:` 区切り。既定は `/Applications:$HOME/Applications`）で、`app` のインベントリを探す場所を差し替えられる（バージョン不明のアプリなどの試験用）。
 
 ### 3.4 サブコマンド
 
@@ -104,7 +105,7 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 |---|---|---|
 | `brew-formula` | brew（ローカル情報のみ。`HOMEBREW_NO_AUTO_UPDATE=1`） | revision（`_1` など）も保持する |
 | `brew-cask` | brew | **.app を持たない cask だけ**（例: `claude-code`）。.app を持つ cask は `app` 側で扱う。フォントは除外 |
-| `app` | `/Applications/*.app` の Info.plist の `CFBundleShortVersionString` のみ（`CFBundleVersion` はビルド番号のことが多いので使わない） | brew の記録したバージョンは使わない。`origin` は `appstore`（`Contents/_MASReceipt` あり）/ `brew-cask` / `sparkle`（`SUFeedURL` あり）/ `other`。Safari は `macos` 側で扱う |
+| `app` | `/Applications` と `~/Applications` の下を 3 階層まで探した `.app`（`.app` の中には入らない。例: `/Applications/BOSS/GX-10/BOSS TONE STUDIO for GX-10.app`）。バージョンは Info.plist の `CFBundleShortVersionString` のみ（`CFBundleVersion` はビルド番号のことが多いので使わない） | brew の記録したバージョンは使わない。`origin` は `appstore`（`Contents/_MASReceipt` あり）/ `brew-cask` / `sparkle`（`SUFeedURL` あり）/ `other`。Safari は `macos` 側で扱う |
 | `npm` / `pnpm` | `npm ls -g --json --depth=0` / `pnpm ls -g --json` | ecosystem は npm |
 | `uv` | `uv tool list` | ecosystem は PyPI |
 | `gem` | rbenv の各 Ruby で `gem list` | ecosystem は RubyGems。インストール済みの版ごとに 1 項目（OSV の照合に正確な版が要る） |
