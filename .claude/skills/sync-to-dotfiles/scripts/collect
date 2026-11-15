@@ -39,6 +39,9 @@ HEAD_ZSHRC_LINES=""
 # content_flags の結果（フラグのカンマ区切りと、秘密と判定した値を *** に置き換えた内容）
 FLAGS=""
 MASKED=""
+# / 直下に実在するディレクトリ（/opt など。リンク先がディレクトリのものも）を改行でつなぎ、前後にも改行を付けたもの
+# （scan_secrets で、/ で始まる値がパスかを見分けるのに使う）
+ROOT_DIRS=""
 
 # UTF-8 の文字数を数える awk の関数（LC_ALL=C で、続きのバイト 0x80-0xBF を数えない）
 AWK_UTF8='
@@ -192,24 +195,32 @@ has_missing_path() {
 
 # scan_secrets <モード>: 標準入力から秘密情報（§6 の secret の条件）を探し、秘密と判定した値を *** に置き換えて出す。
 # モードは text、diff（git diff。差分の行は先頭の 1 文字を除いて調べる）、plist（plist_changes の形。文字列の値を
-# 調べる）。text は、秘密情報が見つかれば終了コード 0
+# 調べる）。秘密情報が見つかれば終了コード 0。複数行にわたる値（閉じ引用符が後の行にある値、YAML の キー: | の
+# ブロック）は、続きの行も置き換える
 scan_secrets() {
-  awk -v mode="$1" '
+  ROOT_DIRS="$ROOT_DIRS" awk -v mode="$1" '
     function secret_name(n) {
       n = toupper(n)
       return n ~ /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL/ || n ~ /_KEY$/
     }
     # v は引用符を外した値、q は値を囲む引用符（無ければ空。$ の後ろの単一引用符で囲んだ値は単一引用符として渡す）。
     # SSH_KEY=~/.ssh/id_rsa、TOKEN_DIR=./tokens、API_KEY_PATH=keys/api、TOKEN_FILE=token.txt、TOKENIZERS_PARALLELISM=false、
-    # MAX_TOKENS=4096 のような値は秘密情報ではない。パスは ~ / ./ ../ で始まる値、名前が _FILE _PATH _DIR で終わるもの、
-    # 拡張子で終わる値だけにする（/ を含むだけの値は除かない。AWS_SECRET_ACCESS_KEY のような base64 の秘密は / を含む）。
+    # MAX_TOKENS=4096 のような値は秘密情報ではない。パスは ~ ./ ../ で始まる値、/ で始まり最初の要素が / 直下に実在する
+    # ディレクトリの値（/opt/...。ROOT_DIRS で見る）、名前が _FILE _PATH _DIR で終わるもの、拡張子で終わる値だけにする
+    # （/ を含むだけの値は除かない。AWS_SECRET_ACCESS_KEY のような base64 の秘密は / を含み、/ から始まることもある）。
     # PASSWORD=12345 は数字だけでも秘密情報とし（PASSWORD_STORE_CLIP_TIME=45 は除く）、
-    # 単一引用符で囲んだ値は展開されない文字列なので $ で始まっても除かない
+    # $ か ` で始まる値（別の変数やコマンドの出力）は除く。ただし ${NAME:-語} ${NAME:=語} ${NAME-語} ${NAME=語} は語を
+    # 値として調べ、単一引用符で囲んだ値は展開されない文字列なので $ や ` で始まっても除かない
     function secret_value(name, v, q) {
       if (v == "" || tolower(v) ~ /^(true|false|yes|no|on|off)$/) return 0
-      if (v ~ /^(~|\/|\.\.?\/)/ || toupper(name) ~ /_(FILE|PATH|DIR)$/) return 0
+      if (v ~ /^(~|\.\.?\/)/ || toupper(name) ~ /_(FILE|PATH|DIR)$/) return 0
+      if (match(v, /^\/[^\/]*/) && index(ENVIRON["ROOT_DIRS"], "\n" substr(v, 1, RLENGTH) "\n")) return 0
       if (tolower(v) ~ /\.(txt|json|ya?ml|toml|pem|key|conf|cfg|ini|env|gpg|asc)$/) return 0
-      if (v ~ /^\$/ && q != "\047") return 0
+      if (q != "\047" && v ~ /^\$\{[[:alpha:]_][[:alnum:]_]*:?[-=].*\}$/) {
+        sub(/^\$\{[[:alpha:]_][[:alnum:]_]*:?[-=]/, "", v)
+        return secret_value(name, substr(v, 1, length(v) - 1), q)
+      }
+      if (v ~ /^[$`]/ && q != "\047") return 0
       return v !~ /^[0-9]+$/ || toupper(name) ~ /(PASSWORD|PASSWD|SECRET|PIN)$/
     }
     # 先頭の引用符で囲んだ文字列の中身（閉じていなければ最後まで）
@@ -265,9 +276,17 @@ scan_secrets() {
       else {
         q = ""; value = rest; sub(/(^|[[:space:]])#.*/, "", value); sub(/[[:space:],]+$/, "", value)
         a = vpos; b = vpos + length(value) - 1
+        # YAML のブロック（キー: | キー: >）は、次の行から、キーより深く字下げした行を値とする（scan で置き換える）
+        if (sep == ":" && value ~ /^[|>][-+0-9]*$/) {
+          if (secret_name(key)) { match(s, /^[[:space:]]*(-[[:space:]]+)?/); block_col = RLENGTH }
+          return
+        }
       }
       if (key ~ /^["\047]/) key = unquote(key)
-      if (secret_name(key) && secret_value(key, value, q)) add_span(a, b)
+      if (!secret_name(key) || !secret_value(key, value, q)) return
+      add_span(a, b)
+      # 引用符が閉じないまま行の終わりに来たら、閉じ引用符のある行までを値の続きとする
+      if (q != "" && close_quote(rest) > length(rest)) cont_q = q
     }
     # 行の中の NAME=値 の形の単語（ws は行の中の単語の開始位置）。[[ ... ]] の中（比較）と alias の名前は代入ではない。
     # alias の値は、その中（引用符で囲んでいれば引用符の中）をコマンドとして同じ条件で調べる
@@ -294,6 +313,8 @@ scan_secrets() {
       if (!secret_name(name) || !secret_value(name, v, q)) return
       if (q != "" && close_quote(substr(raw, d + 1)) == length(raw) - d) add_span(ws + d + 1, ws + length(raw) - 2)
       else add_span(ws, ws + length(raw) - 1)
+      # 引用符が閉じないまま行の終わりに来たら、閉じ引用符のある行までを値の続きとする（alias の値の中は除く）
+      if (q != "" && close_quote(substr(raw, d + 1)) > length(raw) - d && ws + length(raw) - 1 == length(cur)) cont_q = q
     }
     # 行を単語に分ける。コメントアウトした代入も数える（# を区切りとして扱う）。
     # off は、s が行の一部（alias の値）のときの、行の中の位置のずれ
@@ -337,9 +358,26 @@ scan_secrets() {
       if (match(substr(s, p), /-----END[A-Z0-9 ]*PRIVATE KEY-----/)) { add_span(p, p + RSTART - 2); in_key = 0 }
       else add_span(p, length(s))
     }
-    # 行の中の秘密情報の範囲を span_s / span_e に入れ、見つかれば真
+    # 前の行から続く秘密の値（cont_q は閉じていない引用符、block_col は YAML のブロックのキーの桁）の行なら、
+    # その値の部分の範囲を足して真。閉じ引用符の後ろとブロックの後ろの行は、値の続きではない
+    function continued(s,   i) {
+      if (cont_q != "") {
+        i = close_quote(cont_q s) - 1
+        if (i <= length(s)) { add_span(1, i - 1); cont_q = "" }
+        else add_span(1, length(s))
+        return 1
+      }
+      if (block_col == "") return 0
+      match(s, /^[[:space:]]*/)
+      if (RLENGTH > block_col) add_span(RLENGTH + 1, length(s))
+      else if (RLENGTH < length(s)) { block_col = ""; return 0 }
+      return 1
+    }
+    # 行の中の秘密情報の範囲を span_s / span_e に入れ、見つかれば真。複数行にわたる値の続きの行は、
+    # 値の部分（閉じ引用符の手前まで、ブロックの行は字下げの後ろ）を置き換え、ほかは調べない
     function scan(s) {
-      nspan = 0
+      nspan = 0; cur = s
+      if (continued(s)) return nspan > 0 || found_key
       private_key(s)
       config_pair(s)
       assignments(s, 0)
@@ -349,8 +387,9 @@ scan_secrets() {
       spans(s, "[^[:alnum:]_][Bb]earer[[:space:]]+[[:alnum:]._~+/=-]{16,}", "^.[Bb]earer[[:space:]]+", 0)
       # .npmrc の _authToken。$ で始まる値（${NPM_TOKEN}）は別の変数なので除く
       spans(s, "_authToken[[:space:]]*=[[:space:]]*[\"\047]?[^$[:space:]\"\047][^[:space:]\"\047]{7,}", "^_authToken[[:space:]]*=[[:space:]]*[\"\047]?", 0)
-      # URL の中の認証情報（://<ユーザー>:<パスワード>@）。$ で始まるパスワードは、別の変数なので除く
-      spans(s, "://[^/[:space:]:@]*:[^$/[:space:]@][^/[:space:]@]*@", "^://[^/[:space:]:@]*:", 1)
+      # URL の中の認証情報（://<ユーザー>:<パスワード>@）。パスワードは、次の / か空白か行末より手前の最後の @ まで
+      # （p@ss のように @ を含むもの）。$ で始まるパスワードは、別の変数なので除く
+      spans(s, "://[^/[:space:]:@]*:[^$/[:space:]@][^/[:space:]]*@", "^://[^/[:space:]:@]*:", 1)
       return nspan > 0 || found_key
     }
     # scan した行の範囲を *** に置き換えた行（重なる範囲と隣り合う範囲はまとめる）
@@ -371,28 +410,26 @@ scan_secrets() {
     # plist の値。文字列は "" の中を \n で行に分けて調べる（data、数値、日付、真偽値は見ない）
     function masked_value(v,   n, parts, i, out) {
       if (v !~ /^".*"$/) return v
-      in_key = 0
+      in_key = 0; cont_q = block_col = ""
       n = split(substr(v, 2, length(v) - 2), parts, /\\n/)
       out = ""
-      for (i = 1; i <= n; i++) { scan(parts[i]); out = out (i > 1 ? "\\n" : "") masked(parts[i]) }
+      for (i = 1; i <= n; i++) { if (scan(parts[i])) found = 1; out = out (i > 1 ? "\\n" : "") masked(parts[i]) }
       return "\"" out "\""
     }
     mode == "text" { if (scan($0)) found = 1; print masked($0); next }
     # 差分の見出し（最初の @@ より前）はそのまま出す
+    # 差分の見出し（最初の @@ より前）はそのまま出す。複数行にわたる値は、hunk をまたいでは続けない
     mode == "diff" {
-      if (/^@@/) hunk = 1
+      if (/^@@/) { hunk = 1; cont_q = block_col = "" }
       if (!hunk) print
-      else if (/^[-+ ]/) { s = substr($0, 2); scan(s); print substr($0, 1, 1) masked(s) }
-      else { scan($0); print masked($0) }
+      else if (/^[-+ ]/) { s = substr($0, 2); if (scan(s)) found = 1; print substr($0, 1, 1) masked(s) }
+      else { if (scan($0)) found = 1; print masked($0) }
       next
     }
     mode == "plist" { split($0, f, "\t"); print f[1] "\t" masked_value(f[2]) "\t" masked_value(f[3]) }
-    END { if (mode == "text") exit !found }
+    END { exit !found }
   '
 }
-
-# mask_secrets <モード> <内容>: 秘密と判定した値を *** に置き換える（モードは scan_secrets と同じ）
-mask_secrets() { printf '%s\n' "$2" | scan_secrets "$1"; }
 
 # LONG_LINE_CHARS 文字以上の行か、BLANK_LINE_CHARS 文字以上の空白だけの行があるか
 has_garbage() {
@@ -418,15 +455,17 @@ in_dotfiles() {
   [ -n "$HEAD_ZSHRC" ] && [[ "$HEAD_ZSHRC_LINES" == *$'\n'"$1"$'\n'* ]]
 }
 
-# content_flags <内容>: 内容だけで決まるフラグを FLAGS にカンマ区切りで入れる。秘密情報は 1 回のスキャンで
-# 判定と置き換えを行い、秘密と判定した値を *** に置き換えた内容を MASKED に入れる
+# content_flags <内容> [<モード> <本文>]: 内容だけで決まるフラグを FLAGS にカンマ区切りで入れる。
+# secret だけは、本文を渡せば本文で判定する（モードは scan_secrets と同じ。lib では、足された内容だけでなく
+# 本文に出すすべての行で判定するため）。秘密情報は 1 回のスキャンで判定と置き換えを行い、秘密と判定した値を
+# *** に置き換えた本文（渡さなければ内容）を MASKED に入れる
 content_flags() {
   local out
   FLAGS=""
   has_home_path "$1" && FLAGS="$FLAGS,home-path"
   has_missing_path "$1" && FLAGS="$FLAGS,missing-path"
   # $( ) が末尾の改行を落とさないよう、終了コード（秘密情報があれば 0）を後ろに付けて受け取る
-  out="$(printf '%s\n' "$1" | scan_secrets text; echo "/$?")"
+  out="$(printf '%s\n' "${3-$1}" | scan_secrets "${2:-text}"; echo "/$?")"
   [ "${out##*/}" = 0 ] && FLAGS="$FLAGS,secret"
   out="${out%/*}"
   MASKED="${out%$'\n'}"
@@ -687,7 +726,7 @@ has_shellenv() {
 }
 
 # zsh_item <種類> <行の範囲> <段落> <状態>: 段落を 1 項目として出す。コメントだけの段落は出さない。
-# 状態が incomplete（zsh_unit を参照）なら warn を出す（行番号は lines の開始と同じ）。
+# 状態が incomplete（zsh_unit を参照）なら warn を出す（行番号は lines の開始と同じ。除外リストで除くものには出さない）。
 # id は、段落のコメントでない行を前後の空白を除いて " ⏎ " でつないだもの。
 # secret が立つものは、秘密情報を除外リストに書き写さないよう id を sha256:<SHA-256> にし、
 # 本文の秘密と判定した値を *** に置き換える（id とフラグは置き換える前の内容で決める）
@@ -695,9 +734,6 @@ zsh_item() {
   local lines key flags body="$3"
   lines="$(printf '%s\n' "$3" | noncomment_lines)"
   [ -n "$lines" ] || return 0
-  if [ "$4" = incomplete ]; then
-    add_warning "~/.$1 の ${2%-*} 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていないか、最後の行が \ && || | で終わる）ため、そこまでを 1 項目にしています"
-  fi
   key="${lines//$'\n'/ ⏎ }"
   content_flags "$3"
   flags="$FLAGS"
@@ -705,6 +741,9 @@ zsh_item() {
   if has_flag "$flags" secret; then
     key="sha256:$(printf '%s' "$key" | shasum -a 256 | cut -d ' ' -f 1)"
     body="$MASKED"
+  fi
+  if [ "$4" = incomplete ] && ! is_ignored "$1:$key"; then
+    add_warning "~/.$1 の ${2%-*} 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていないか、最後の行が \ && || | で終わる）ため、そこまでを 1 項目にしています"
   fi
   emit_item "$1" "$key" local "$flags" "$body" "$2"
 }
@@ -887,7 +926,8 @@ added_lines() {
   awk '/^@@/ { hunk = 1; next } hunk && /^\+/ { print substr($0, 2) }'
 }
 
-# lib_item <"XY パス">: lib/ の変更 1 件を要約して出す。フラグは足された内容で判定し、
+# lib_item <"XY パス">: lib/ の変更 1 件を要約して出す。フラグは足された内容で判定し（secret だけは本文に出す
+# すべての行で判定する。誤って commit した秘密を消す変更でも、平文で出さないため）、
 # secret が立つものは本文の秘密と判定した値を *** に置き換える
 lib_item() {
   local status="${1:0:2}" path="${1:3}" file body flags="" diff changes content
@@ -911,21 +951,21 @@ lib_item() {
     fi
   elif [ "${path%.plist}" != "$path" ] && changes="$(plist_changes "$path")"; then
     # 本文とフラグは、plist を 1 回だけ読んだ結果から作る（間に iTerm2 が保存しても食い違わないように）
-    content_flags "$(printf '%s\n' "$changes" | plist_added_values)"
+    content_flags "$(printf '%s\n' "$changes" | plist_added_values)" plist "$changes"
     flags="$FLAGS"
     if [ -z "$changes" ]; then
       body="(キーと値は HEAD と同じです。書式だけが変わっています)"
     else
-      has_flag "$flags" secret && changes="$(mask_secrets plist "$changes")"
+      has_flag "$flags" secret && changes="$MASKED"
       body="$(printf '%s\n' "$changes" | plist_summary | head_lines)"
     fi
   else
     # plist 以外と、plist として読めないもの（削除や新規の追加）は git diff で出す
     diff="$(repo_git diff --no-color --no-ext-diff HEAD -- "$path")"
-    content_flags "$(printf '%s\n' "$diff" | added_lines)"
-    flags="$FLAGS"
     body="$(printf '%s\n' "$diff" | head_lines)"
-    has_flag "$flags" secret && body="$(mask_secrets diff "$body")"
+    content_flags "$(printf '%s\n' "$diff" | added_lines)" diff "$body"
+    flags="$FLAGS"
+    has_flag "$flags" secret && body="$MASKED"
     [ -n "$diff" ] || body="(HEAD との差分はありません)"
   fi
   emit_item lib "$path" changed "$flags" "$body"
@@ -967,6 +1007,10 @@ fi
 HEAD_BREWFILE="$(repo_git show HEAD:lib/Brewfile 2>/dev/null)"
 HEAD_ZSHRC="$(repo_git show HEAD:lib/zshrc 2>/dev/null)"
 HEAD_ZSHRC_LINES=$'\n'"$(printf '%s\n' "$HEAD_ZSHRC" | noncomment_lines)"$'\n'
+ROOT_DIRS=$'\n'
+for dir in /* /.[!.]*; do
+  [ -d "$dir" ] && ROOT_DIRS="$ROOT_DIRS$dir"$'\n'
+done
 
 read_ignore_list
 read_status
