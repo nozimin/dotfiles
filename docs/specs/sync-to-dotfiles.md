@@ -190,6 +190,8 @@ ignored: 1
 - 段落が閉じないまま続くと、つなぐたびに `zsh -n` をかけ直すので、処理時間が段落の数の 2 乗で増える。`~/.zshrc` の大きさでは問題にならない。
 - 設定ファイル形式の `secret` は、キー名のハイフン（`api-key`）に当たらない。
 - 段落を消した後、前後の空行が重なって残る。内容には影響しない。
+- 秘密らしい名前の URL（`OAUTH_TOKEN_URL=https://...`）も `secret` になり、共通化を選べない。Slack の Webhook のように URL そのものが秘密のこともあるので、安全側に倒している。
+- `zshrc-sources-lib` は同じリポジトリのどの worktree の `lib/zshrc` でも `yes` になる。`~/.zshrc` が main 以外の worktree を読み込んでいると、main への commit がその worktree に入るまで、取り込んだ設定が効かない。
 
 ## 11. 受け入れ条件
 
