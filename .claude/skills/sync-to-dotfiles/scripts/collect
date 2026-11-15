@@ -200,11 +200,14 @@ scan_secrets() {
       return n ~ /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL/ || n ~ /_KEY$/
     }
     # v は引用符を外した値、q は値を囲む引用符（無ければ空。$ の後ろの単一引用符で囲んだ値は単一引用符として渡す）。
-    # SSH_KEY=~/.ssh/id_rsa、TOKEN_FILE=token.txt、TOKENIZERS_PARALLELISM=false、MAX_TOKENS=4096 のような値は
-    # 秘密情報ではない。ただし PASSWORD=12345 は数字だけでも秘密情報とし（PASSWORD_STORE_CLIP_TIME=45 は除く）、
+    # SSH_KEY=~/.ssh/id_rsa、TOKEN_DIR=./tokens、API_KEY_PATH=keys/api、TOKEN_FILE=token.txt、TOKENIZERS_PARALLELISM=false、
+    # MAX_TOKENS=4096 のような値は秘密情報ではない。パスは ~ / ./ ../ で始まる値、名前が _FILE _PATH _DIR で終わるもの、
+    # 拡張子で終わる値だけにする（/ を含むだけの値は除かない。AWS_SECRET_ACCESS_KEY のような base64 の秘密は / を含む）。
+    # PASSWORD=12345 は数字だけでも秘密情報とし（PASSWORD_STORE_CLIP_TIME=45 は除く）、
     # 単一引用符で囲んだ値は展開されない文字列なので $ で始まっても除かない
     function secret_value(name, v, q) {
-      if (v == "" || v ~ /^~/ || index(v, "/") || tolower(v) ~ /^(true|false|yes|no|on|off)$/) return 0
+      if (v == "" || tolower(v) ~ /^(true|false|yes|no|on|off)$/) return 0
+      if (v ~ /^(~|\/|\.\.?\/)/ || toupper(name) ~ /_(FILE|PATH|DIR)$/) return 0
       if (tolower(v) ~ /\.(txt|json|ya?ml|toml|pem|key|conf|cfg|ini|env|gpg|asc)$/) return 0
       if (v ~ /^\$/ && q != "\047") return 0
       return v !~ /^[0-9]+$/ || toupper(name) ~ /(PASSWORD|PASSWD|SECRET|PIN)$/
