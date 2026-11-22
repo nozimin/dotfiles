@@ -3,7 +3,6 @@ name: vuln-check
 description: この Mac に入っているアプリやライブラリの脆弱性を調べ、優先度を付けてチャットとレポートに出す。読み取り専用。
 disable-model-invocation: true
 allowed-tools:
-  - Bash(~/.claude/skills/vuln-check/scripts/vulncheck *)
   - Bash(jq *)
   - Read(~/Documents/vuln-check/**)
   - Edit(~/Documents/vuln-check/**)
@@ -17,9 +16,9 @@ allowed-tools:
 
 ## 守ること
 
-- **読み取り専用**。実行するのは `vulncheck`、`jq`、`ls` と、WebSearch / WebFetch での調査だけ。パッケージやアプリ、brew のメタデータを変えるコマンド（`brew update` / `brew upgrade` を含む）は更新コマンドとして提示するまでにし、実行はユーザーに任せる。
-- `vulncheck` は `~/.claude/skills/vuln-check/scripts/vulncheck` のこと。`allowed-tools` がこの書き方で許可しているので、`~` から始まるこのパスのまま実行する。
-- ファイルに書くのは、手順 7 のレポートの Write だけ。`vulncheck all` の出力は `--save` で保存し、シェルのリダイレクト（`>`）は使わない（行き先ごとに書き込みの許可が要る）。
+- **読み取り専用**。実行するのは `vulncheck`、`jq`、`ls` と、Web 検索と Web ページの取得（Claude Code では WebSearch / WebFetch）での調査だけ。パッケージやアプリ、brew のメタデータを変えるコマンド（`brew update` / `brew upgrade` を含む）は更新コマンドとして提示するまでにし、実行はユーザーに任せる。
+- `vulncheck` は、この skill に同梱した `scripts/vulncheck` のこと。skill loader が示すこの `SKILL.md` の絶対パスから `skill_scripts`（同じディレクトリの `scripts/` の絶対パス）を求め、`"$skill_scripts/vulncheck"` の絶対パスで実行する。別々のシェル呼び出しで変数が引き継がれない場合も、読み込まれた `SKILL.md` の絶対パスから作り直す。
+- ファイルに書くのは、手順 7 のレポートだけ（Claude Code では Write）。`vulncheck all` の出力は `--save` で保存し、シェルのリダイレクト（`>`）は使わない（行き先ごとに書き込みの許可が要る）。
 - バージョンの大小は `vulncheck compare <インストール済み> <修正版>` の出力で決める。`lt` なら該当、`eq` / `gt` なら修正済み、終了コード 2 なら比較不能。
 - 書くのは、取得したデータと読んだページに書いてあることだけ。読んだページの URL は根拠として残す。
 - 出力はすべて日本語。
@@ -44,7 +43,7 @@ allowed-tools:
 ### 1. 収集する
 
 ```sh
-~/.claude/skills/vuln-check/scripts/vulncheck all --save
+"$skill_scripts/vulncheck" all --save
 ```
 
 標準出力に保存先のパスだけが出る。出力は数百 KB あるので、以降は `jq` でそのファイル（下の `<保存先>`）から、`layer` と `source` ごと、対象ごとに必要な部分だけを読む。まず全体を見る。
@@ -54,6 +53,7 @@ jq -r '.[] | [.layer, .source, .status, .count, (.items | length), (.evidence.re
 ```
 
 - 終了コードが 0 でないか、保存先のファイルが JSON の配列でなければ、エラーの内容をチャットに出して終える。
+- インベントリ以外のソースがすべて `error` で、`notes` が取得の失敗（名前解決や接続の失敗）なら、ネットワークが使えていない（Codex のサンドボックスなど）。ネットワークを許可して実行し直すようユーザーに伝えて終える。
 - エンベロープは `{source, layer, status, count, fetched_at, evidence, notes, items}`。`count` はそのソースで読み取った件数、`evidence` は「該当なし」の根拠（読んだ URL、件数、層1の取得できた期間 `period`（`from` / `to`）と最新の日付 `newest` など）、`notes` は補足。インベントリの `source` は kind 名で、層2の `vscode` と同じ名前になるので、`layer` と `source` の組で区別する。
 - `items` の形（`review` は判定できない項目だけが理由の文字列を持ち、他は `null`）:
 
@@ -175,7 +175,7 @@ ls -1 ~/Documents/vuln-check/reports/*.json | tail -n 1
    jq -r '[.[].fetched_at] | min | .[0:19] | gsub("[-T:]"; "")' <保存先>
    ```
 
-2. Write で `~/Documents/vuln-check/reports/<名前>.md` と `~/Documents/vuln-check/reports/<名前>.json` を書く（「出力」の節）。ディレクトリが無ければ Write が作る。前回までのレポートはそのまま残す。
+2. `~/Documents/vuln-check/reports/<名前>.md` と `~/Documents/vuln-check/reports/<名前>.json` を書く（「出力」の節。Claude Code では Write を使い、ディレクトリが無ければ Write が作る）。前回までのレポートはそのまま残す。
 3. チャットにサマリーを出す（「出力」の節）。
 
 ## トリアージ

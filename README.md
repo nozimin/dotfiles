@@ -28,14 +28,13 @@ git clone https://github.com/nozimin/dotfiles.git ~/WorkSpace/Repositories/dotfi
 | GitHub (gh) | `gh auth login` でログインし、`gh auth setup-git` で git の認証に gh を使う | [lib/git.md](lib/git.md) |
 | git | `user.name` と `user.email` が未設定なら入力してもらう | [lib/git.md](lib/git.md) |
 | skills | Claude Code / Codex に `nozimin` plugin を確認してインストールする | [lib/skills.md](lib/skills.md) |
-| Claude skills | `lib/claude/skills/` の skill ごとに、`~/.claude/skills/<名前>` をシンボリックリンクにする | [lib/claude-code.md](lib/claude-code.md) |
 
 `~/.zshrc` などへの追記や、既存ファイルの退避は、内容を表示して確認してから行う。最後にスキップしたものと失敗したものを表示する。失敗があれば終了コードは 1。
 skills は plugin が未導入の場合、または collect が使える repo pointer がない場合に確認し、許可したときに専用の `cmd/install_skills` が登録と pointer を修復する。
 
 ## リポジトリを移動したとき
 
-`~/.zshrc` の source 行、`~/.config/starship.toml` と `~/.claude/skills/<名前>` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。Agent Skills は marketplace の再登録が別途必要なため、続けて移動先の `cmd/install_skills` も実行する。`cmd/setup` は clone 移動を検出すると skills の状態照会を skip として案内する。
+`~/.zshrc` の source 行、`~/.config/starship.toml` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。Agent Skills は marketplace の再登録が別途必要なため、続けて移動先の `cmd/install_skills` も実行する。`cmd/setup` は clone 移動を検出すると skills の状態照会を skip として案内する。
 
 iTerm2 の手順は iTerm2 を終了しないと実行できないので、Terminal.app から実行する。
 
@@ -63,6 +62,17 @@ Codex CLI:  `$nozimin:sync-to-dotfiles`（`/skills` の一覧から選択）
 - 隠れるのは、この Mac にだけある Brewfile と zsh の項目。Brewfile にあるのにインストールされていないもの（逆向きの差分）は、同じ `id` を書いても表に出る。`lib/` の変更（`lib:<リポジトリからの相対パス>`）はローカル専用にできないので、書いても無視され、警告が出る。
 - 行を消すと、その項目はまた表に出る。
 
+## 脆弱性を調べる
+
+この Mac に入っているアプリやライブラリのうち、脆弱性のあるものを優先度付きで一覧にする（読み取り専用）。
+
+```
+Claude Code: /nozimin:vuln-check
+Codex CLI:  $nozimin:vuln-check
+```
+
+使い方、対象、外部に送る情報は [lib/vuln-check.md](lib/vuln-check.md)。
+
 ## 構成
 
 ```
@@ -78,13 +88,13 @@ lib/
   zshrc                        共通の zsh 設定（~/.zshrc から source する）
   starship.toml                starship の設定
   com.googlecode.iterm2.plist  iTerm2 の設定
-  claude/skills/               Claude Code 専用の skill（skill ごとに ~/.claude/skills へリンクする）
+  *.md                         各ツールや Agent Skills のドキュメント
   agents/                      Claude Code / Codex 共通 plugin と skills
     .claude-plugin/            dotfiles marketplace
     nozimin/                   plugin と skills
       skills/sync-to-dotfiles/scripts/with-repo-lock  承認済み clone を検証して書き込みを直列化
-  *.md                         各ツールや Agent Skills のドキュメント
-                               （lib/agents は Claude Code と Codex 共通の plugin、lib/claude/skills は Claude Code 専用で ~/.claude/skills へリンク）
+      skills/vuln-check/       この Mac のアプリやライブラリの脆弱性を調べる（lib/vuln-check.md）
+cmd/install_skills              plugin の登録とインストール
 docs/
   specs/         仕様書（実装の正。食い違いは実装側を直す）
 ```

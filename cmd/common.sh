@@ -70,26 +70,24 @@ is_linked() {
   [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]
 }
 
-# link_file <リンク元> <リンク先> [退避先のディレクトリ]
+# link_file <リンク元> <リンク先>
 # 確認してからリンクを作る。別の場所へのリンクは張り替え、ファイルは退避する。
-# 退避先のディレクトリを省略すると、リンク先と同じディレクトリに退避する。
-# 確認で断られたら 2、退避やリンクの作成に失敗したら 1 を返す。
 link_file() {
-  local src="$1" dest="$2" backup_dir="${3:-$(dirname "$2")}" backup="" question
+  local src="$1" dest="$2" backup="" question
   if is_linked "$src" "$dest"; then
     return 0
   fi
   if [ -L "$dest" ]; then
     question="$(pretty_path "$dest") は $(pretty_path "$(readlink "$dest")") へのリンクです。$(pretty_path "$src") へのリンクに張り替えますか？"
   elif [ -e "$dest" ]; then
-    backup="$backup_dir/$(basename "$dest").backup-$(date +%Y%m%d%H%M%S)"
+    backup="$dest.backup-$(date +%Y%m%d%H%M%S)"
     question="$(pretty_path "$dest") が既にあります。$(pretty_path "$backup") に退避して $(pretty_path "$src") へのリンクにしますか？"
   else
     question="$(pretty_path "$dest") を $(pretty_path "$src") へのリンクにしますか？"
   fi
-  ask_yes_no "$question" || return 2
+  ask_yes_no "$question" || return 1
   if [ -n "$backup" ]; then
-    mkdir -p "$backup_dir" && mv "$dest" "$backup" || return 1
+    mv "$dest" "$backup" || return 1
     ok "$(pretty_path "$backup") に退避しました"
   elif [ -L "$dest" ]; then
     rm "$dest" || return 1

@@ -108,12 +108,7 @@ setup_starship() {
     ok "starship の設定はリンク済み"
     return
   fi
-  link_file "$src" "$dest"
-  case $? in
-    0) ;;
-    2) skip "starship" ;;
-    *) fail "starship" "退避かリンクの作成に失敗しました" ;;
-  esac
+  link_file "$src" "$dest" || skip "starship"
 }
 
 # iTerm2 の設定を lib/com.googlecode.iterm2.plist から読み込み、変更を自動で保存する
@@ -205,47 +200,6 @@ setup_git_user() {
   fi
 }
 
-# ~/.claude/skills/<名前> -> lib/claude/skills/<名前>
-# skill ごとにリンクする。~/.claude/skills にあるほかの skill はそのまま残す。
-# ~/.claude/skills の中に退避すると退避したものも skill として読み込まれるので、外に退避する。
-setup_claude_skills() {
-  local dir src dest name found=""
-  for dir in "$LIB_DIR"/claude/skills/*/; do
-    # lib/claude/skills/ が無いか空のときは、パターンがそのまま残る
-    [ -d "$dir" ] || continue
-    found=1
-    if [ -L "$HOME/.claude/skills" ]; then
-      # リンク先（このリポジトリ、別のチェックアウト、古い場所など）の中身を退避で動かしてしまうので、何もしない
-      fail "Claude skills" "~/.claude/skills が $(pretty_path "$(readlink "$HOME/.claude/skills")") へのリンクです。実際のディレクトリに置き換えてから再実行してください"
-      return
-    fi
-    src="${dir%/}"
-    name="${src##*/}"
-    dest="$HOME/.claude/skills/$name"
-    if is_linked "$src" "$dest"; then
-      ok "$(pretty_path "$dest") はリンク済み"
-      continue
-    fi
-    if [ ! -L "$dest" ] && [ "$dest" -ef "$src" ]; then
-      # ~/.claude ごとリポジトリを指しているときも、退避でリポジトリの中身を動かしてしまう
-      fail "Claude skill $name" "$(pretty_path "$dest") はリポジトリの lib/claude/skills/$name そのものです。~/.claude がリポジトリを指していないか確かめてください"
-      continue
-    fi
-    if [ -e "$dest" ] && [ ! -L "$dest" ]; then
-      echo "$(pretty_path "$dest") の中身:"
-      # shellcheck disable=SC2012 # 表示するだけ
-      ls -lA "$dest" | sed 's/^/    /'
-    fi
-    link_file "$src" "$dest" "$HOME/.claude/skills-backup"
-    case $? in
-      0) ;;
-      2) skip "Claude skill $name" ;;
-      *) fail "Claude skill $name" "退避かリンクの作成に失敗しました" ;;
-    esac
-  done
-  [ -n "$found" ] || ok "lib/claude/skills/ にリンクする skill はありません"
-}
-
 # Claude Code と Codex の両方で plugin が有効か確認する。
 setup_skills() {
   local status
@@ -290,6 +244,4 @@ step "git"
 setup_git_user
 step "skills"
 setup_skills
-step "Claude skills"
-setup_claude_skills
 summary

@@ -13,16 +13,16 @@
 ## 2. ファイル構成
 
 ```
-lib/claude/skills/vuln-check/
+lib/agents/nozimin/skills/vuln-check/
   SKILL.md              手順・トリアージ基準・レポートの雛形
+  agents/openai.yaml    Codex で明示的に選んだときだけ実行する設定
   scripts/vulncheck     決定的な処理（収集・照合・バージョン比較）。bash
   tests/run             試験（§10）
 docs/specs/vuln-check.md  この文書
-lib/claude-code.md        skill のリンクと /vuln-check の使い方
-                          （lib/claude.md にしない。大文字小文字を区別しない FS では lib/CLAUDE.md として自動で読み込まれる）
+lib/vuln-check.md         /vuln-check の使い方
 ```
 
-- `cmd/setup` の `setup_claude_skills` が `lib/claude/skills/*/` を skill ごとに `~/.claude/skills/<名前>` へシンボリックリンクする（§11）。
+- dotfiles の plugin `nozimin` の skill として、`cmd/install_skills` で Claude Code と Codex に入れる（lib/skills.md の仕組み。§11）。呼び出しは Claude Code が `/nozimin:vuln-check`、Codex CLI が `$nozimin:vuln-check`。
 - `scripts/vulncheck` は bash で書き、shellcheck を警告なしで通す。依存は OS 付属のもの（`bash` `curl` `jq` `xmllint` `PlistBuddy` `awk` `find` など）と、インベントリ対象のツール自身（`brew` `npm` など）だけ。Python は使わない。
 
 ## 3. `scripts/vulncheck` の共通仕様
@@ -192,11 +192,12 @@ lib/claude-code.md        skill のリンクと /vuln-check の使い方
 
 ### 8.1 起動と許可
 
-- frontmatter: `disable-model-invocation: true`。`allowed-tools` で次を事前に許可する。
-  - `~/.claude/skills/vuln-check/scripts/vulncheck` の実行
+- frontmatter: `disable-model-invocation: true`（Codex は `agents/openai.yaml` の `policy.allow_implicit_invocation: false`）。`allowed-tools`（Claude Code）で次を事前に許可する。
   - `jq` の実行（`all --save` の出力を読む。`jq` は組み込みの読み取り専用コマンドに入っていない）
   - `WebFetch`、`WebSearch`
   - `~/Documents/vuln-check/` 以下の読み書き（レポートの保存と前回 JSON の読み込み）
+- `scripts/vulncheck` は、読み込まれた `SKILL.md` の絶対パスから求めた `scripts/` の絶対パスで実行する（lib/skills.md の約束。製品固有の変数は使わない）。plugin の置き場所は Claude Code ではリポジトリ、Codex ではキャッシュで、決まったパスが無いので `allowed-tools` では許可しない（初回の実行で許可を求められる）。
+- Codex のサンドボックスがネットワークを許可していないと、インベントリ以外のソースがすべて `error` になる。そのときはネットワークを許可して実行し直すよう伝えて終える。
 - シェルのリダイレクト（`>`）で書き出さない（行き先ごとに書き込みの許可が要る）。`all` の出力は `--save` で保存する。
 
 ### 8.2 流れ
@@ -307,18 +308,14 @@ P1 [継続] activestorage 7.2.1 → 7.2.3.2, 8.0.2 → 8.0.5.1
 
 ## 11. セットアップとドキュメント
 
-- `cmd/setup` に `setup_claude_skills` を追加する。
-  - `lib/claude/skills/*/` を順に処理し、`~/.claude/skills/<名前>` をそのディレクトリへのシンボリックリンクにする（ディレクトリ全体はリンクしない。既存の他の skill を壊さない）。
-  - 既存の `cmd/common.sh` の関数（`link_file` など）と、README の「ツールを追加する」の約束事に従う: 済んでいれば `ok` を出して何もしない。同じ名前の実体があれば内容を見せて確認してから `~/.claude/skills-backup/<名前>.backup-<日時>` に退避する（`~/.claude/skills` の中に退避すると、退避したものも skill として読み込まれる）。古い場所を指すリンクは確認してから張り直す。
-  - `~/.claude/skills` 自体がシンボリックリンクなら（リンク先がこのリポジトリでも別の場所でも）、退避でリンク先の中身を動かしてしまうので、何もせず `fail` にする。 `~/.claude` ごとリポジトリを指しているなどで、`~/.claude/skills/<名前>` が `lib/claude/skills/<名前>` そのもの（同じファイル）になっている場合も `fail` にする。
-  - ユーザーが確認で断ったときは `skip`、退避やリンクの作成そのものが失敗したときは `fail`（終了コード 1）。`link_file` はこの 2 つを区別して返す（既存の starship の手順も同じ扱いにする）。
-- README: セットアップ手順の表に「Claude skills」の行を足し、構成の節に `lib/claude/` と `docs/specs/` を足す。
-- `lib/claude-code.md`: skill のリンクの仕組み、`/vuln-check` の使い方、対象と対象外、レポートの保存先、外部に送る情報:
+- セットアップは #4 の仕組み（`cmd/setup` の skills の手順と `cmd/install_skills`）に任せ、vuln-check 専用の手順は足さない。`lib/agents/nozimin/skills/vuln-check/` を置けば plugin に含まれる。
+- README: 「脆弱性を調べる」の節に呼び出し方を書き、構成の節に `skills/vuln-check/` と `docs/specs/` を足す。lib/skills.md の「呼び出し」にも足す。
+- `lib/vuln-check.md`: `/vuln-check` の使い方、対象と対象外、レポートの保存先、外部に送る情報:
   - OSV.dev: 言語パッケージの名前とバージョン
   - formulae.brew.sh: formula 名（URL に入る）
   - iTunes Lookup: App Store のアプリの bundle id
-  - WebSearch / WebFetch: AI がリリースノートなどを調べるときの、アプリ名とバージョン
-  - Claude（Anthropic）: インベントリとスクリプトの出力は、Claude との会話の内容として送られる
+  - Web 検索と Web ページの取得: AI がリリースノートなどを調べるときの、アプリ名とバージョン
+  - Claude Code なら Anthropic、Codex なら OpenAI: インベントリとスクリプトの出力は、会話の内容として送られる
 
 ## 12. 試験（`tests/run`）
 
@@ -329,7 +326,7 @@ P1 [継続] activestorage 7.2.1 → 7.2.3.2, 8.0.2 → 8.0.5.1
 5. 層1の鮮度: KEV、JVN iPedia、JVN、JPCERT/CC のそれぞれについて、`VULNCHECK_NOW` を最新の日付の 14 日後より後にすると `warn`、前にすると `ok` になる。取得できた期間が `evidence.period` に入っている。
 6. 項目ごとの要確認: バージョン不明や `unmapped` の項目があってもエンベロープは `ok` のままで、その項目に `review` が付き、`evidence.review` に件数が入る。
 7. silent failure の経路（コードレビュー 1 回目の指摘）: cask API が 0 件 → `warn`。URL ごとの取得結果が取れない → 失敗として扱う。ソースがエンベロープを出さずに終わる → `error`。照合に使うインベントリが一部欠けた（`warn` で項目あり）→ 照合する側も `warn`。`softwareupdate` の読めない更新 → `warn` と `review`。別のメジャー版へのアップグレードだけ → `outdated: false`。MRI 以外の Ruby だけ → endoflife は `ok`。rbenv に Ruby が無い → gem は `ok` で、osv と層1に `warn` が広がらない。OSV の `GIT` の範囲の SHA が `fixed` に入らない。
-8. コードレビュー 2 回目の指摘の経路: rbenv のエイリアスを数えない。gem の警告が項目にならない。uv の読み飛ばしの警告で `warn`。formula の一部の取得失敗で `warn` と取得できた分の項目。探す場所がシンボリックリンクでもアプリを拾う。`~/Applications` の VS Code の `code` を使う。cask の `,` 付きのバージョンを比べられる。`softwareupdate` の時間の上限。別のメジャー版の読めない更新を macOS 本体に当てない。`2.0rc1 eq 2.0.0rc1`。同じ cask の `brew-cask` と `app` を二重に出さない。同じ名前のアプリを区別する。`--inventory` に無い kind で `warn`。setup: `~/.claude/skills` 自体がリンクなら `fail`、リンクの作成の失敗は `fail`。
+8. コードレビュー 2 回目の指摘の経路: rbenv のエイリアスを数えない。gem の警告が項目にならない。uv の読み飛ばしの警告で `warn`。formula の一部の取得失敗で `warn` と取得できた分の項目。探す場所がシンボリックリンクでもアプリを拾う。`~/Applications` の VS Code の `code` を使う。cask の `,` 付きのバージョンを比べられる。`softwareupdate` の時間の上限。別のメジャー版の読めない更新を macOS 本体に当てない。`2.0rc1 eq 2.0.0rc1`。同じ cask の `brew-cask` と `app` を二重に出さない。同じ名前のアプリを区別する。`--inventory` に無い kind で `warn`。
 
 `tests/run` は全項目の結果を表示し、1 つでも失敗すれば終了コード 1。ネットワークが必要な試験（3）はそう明記する。
 最初の本番実行のレポートは、人が見てヤバさの一文と優先度の妥当性を確認する（自動試験の対象外）。
