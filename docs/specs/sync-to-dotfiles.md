@@ -1,7 +1,7 @@
 # sync-to-dotfiles 仕様書
 
 この Mac の設定と dotfiles リポジトリの差分を集め、共通化したいものだけを dotfiles に取り込む Agent Skill。Claude Code と Codex は同じ plugin copy を使う。
-`cmd/setup`（dotfiles → この Mac）と逆向きの入口。
+`cmd/setup`（dotfiles → この Mac）と逆向きの入口。実行時の repo は `~/.config/dotfiles/repo` から読み、canonical absolute path のみ受け付ける。
 
 ## 1. 範囲
 

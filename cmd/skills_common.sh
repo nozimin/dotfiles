@@ -68,6 +68,10 @@ skills_repo_migration_pending() {
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
   pointer_value="$(cat "$pointer")"
   [ -n "$pointer_value" ] || return 1
+  case "$pointer_value" in
+    /*) ;;
+    *) return 1 ;;
+  esac
   pointer_repo="$(cd "$pointer_value" 2>/dev/null && pwd -P)" || pointer_repo="$pointer_value"
   [ "$pointer_repo" != "$REPO_ROOT" ]
 }
@@ -78,7 +82,12 @@ skills_repo_pointer_is_usable() {
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
   pointer_value="$(cat "$pointer")" || return 1
   [ -n "$pointer_value" ] || return 1
+  case "$pointer_value" in
+    /*) ;;
+    *) return 1 ;;
+  esac
   pointer_repo="$(cd "$pointer_value" 2>/dev/null && pwd -P)" || return 1
+  [ "$pointer_repo" = "$pointer_value" ] || return 1
   [ "$pointer_repo" = "$REPO_ROOT" ] || return 1
   [ -f "$pointer_repo/cmd/common.sh" ] &&
     [ -f "$pointer_repo/cmd/install_skills" ] &&
@@ -87,9 +96,14 @@ skills_repo_pointer_is_usable() {
 
 # cmd/setup uses the same state parsing as cmd/install_skills.
 skills_setup_step() {
-  local needs_install=0 have_cli=0 plugin_state codex_home="${CODEX_HOME:-$HOME/.codex}"
+  local needs_install=0 have_cli=0 plugin_state codex_home="${CODEX_HOME:-$HOME/.codex}" pointer="${HOME}/.config/dotfiles/repo"
   if skills_repo_migration_pending; then
     warn "clone 移動または未完了の skills 移行を検出しました。現在の clone から cmd/install_skills を実行してください"
+    return 2
+  fi
+  if { [ -e "$pointer" ] || [ -L "$pointer" ]; } &&
+    { [ ! -f "$pointer" ] || [ -L "$pointer" ]; }; then
+    warn "$pointer は symlink または通常ファイル以外です。内容を確認し、必要なら退避して通常ファイルに直してから cmd/setup を再実行してください。自動では置き換えません"
     return 2
   fi
   if command -v claude >/dev/null 2>&1; then

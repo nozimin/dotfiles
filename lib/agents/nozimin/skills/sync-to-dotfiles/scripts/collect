@@ -1278,8 +1278,16 @@ fi
 if [ ! -f "$DOTFILES_REPO_FILE" ] || [ -L "$DOTFILES_REPO_FILE" ]; then
   fatal "dotfiles リポジトリの場所がありません。cmd/install_skills を実行してください"
 fi
-DOTFILES_REPO="$(cat "$DOTFILES_REPO_FILE")"
-if [ -z "$DOTFILES_REPO" ] || [ ! -f "$DOTFILES_REPO/cmd/common.sh" ] ||
+DOTFILES_REPO="$(cat "$DOTFILES_REPO_FILE")" || fatal "dotfiles repo pointer を読み取れません。cmd/install_skills を実行してください"
+case "$DOTFILES_REPO" in
+  /*) ;;
+  *) fatal "~/.config/dotfiles/repo は絶対パスである必要があります。cmd/install_skills を実行してください" ;;
+esac
+DOTFILES_REPO_CANONICAL="$(cd "$DOTFILES_REPO" 2>/dev/null && pwd -P)" ||
+  fatal "dotfiles repo pointer の clone が見つかりません。cmd/install_skills を実行してください"
+[ "$DOTFILES_REPO_CANONICAL" = "$DOTFILES_REPO" ] ||
+  fatal "~/.config/dotfiles/repo は canonical absolute path である必要があります。cmd/install_skills を実行してください"
+if [ ! -f "$DOTFILES_REPO/cmd/common.sh" ] ||
   [ ! -f "$DOTFILES_REPO/cmd/install_skills" ] || [ ! -d "$DOTFILES_REPO/lib" ]; then
   fatal "~/.config/dotfiles/repo が dotfiles のクローンを指していません。cmd/install_skills を実行してください"
 fi

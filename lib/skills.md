@@ -13,7 +13,7 @@ dotfiles の skills は 1 つの Claude Code 形式 plugin `nozimin` にまと�
 - `cmd/install_skills` と `scripts/with-repo-lock` は `cmd/skills_lock.sh` の `mkdir` lock を共有し、preflight から pointer/marker の更新、または承認された書き込みまでを同時実行から守る。`with-repo-lock` は最初に記録した repo path と pointer を照合し、移行中 marker があれば書き込みを行わない。通常終了では lock を自動で外す。プロセスが強制終了した場合は owner PID が残るので、終了済みと確認してからエラーに表示された `rm -rf ~/.config/dotfiles/install_skills.lock` を実行し、再試行する。owner 情報がない・壊れている、または別 host の lock の場合は自動削除しない。
 - `cmd/setup` は plugin が有効でない場合、または collect が使える repo pointer がない場合に確認し、許可されたときだけ `cmd/install_skills` を実行する。clone 移動または未完了 migration marker を検出したときは skills を失敗扱いにせず skip として案内し、移動先の `cmd/install_skills` を実行する。Agent Skill から Terminal.app で setup を続けるときは `cmd/setup --expect-repo <確認済みrepo path>` を使う。この checked mode は lock 内で pointer と移行 marker を確認し、setup 中に `install_skills` が呼ばれる場合は child installer が親の lock を確認して借りる。
 
-インストール時に clone の絶対パスを `~/.config/dotfiles/repo` に保存する。skill と同梱スクリプトはこの場所から dotfiles を見つけるため、Codex のキャッシュから起動しても動作する。
+インストール時に clone の canonical absolute path（`pwd -P` と一致する絶対パス）を `~/.config/dotfiles/repo` に保存する。`cmd/setup` と `collect` は同じ条件で pointer を検証するため、相対パスや symlink 経由の clone path は使わない。pointer が symlink または通常ファイル以外なら `cmd/setup` は確認前に停止するので、内容を確認して必要なら手動で退避・修復する。skill と同梱スクリプトはこの場所から dotfiles を見つけるため、Codex のキャッシュから起動しても動作する。
 
 ## 既存環境からの移行
 
