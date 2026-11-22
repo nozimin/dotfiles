@@ -20,24 +20,33 @@ CONFIG_DIR="$HOME/.config/dotfiles"
 REPO_POINTER="$CONFIG_DIR/repo"
 MIGRATION_MARKER="$CONFIG_DIR/repo.migrating"
 CODEX_MARKETPLACE_POINTER="$CONFIG_DIR/codex-marketplace"
+CLAUDE_MARKETPLACE_POINTER="$CONFIG_DIR/claude-marketplace"
+# shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
 INSTALL_LOCK_DIR="$CONFIG_DIR/install_skills.lock"
 REPO_POINTER_TMP=""
 MIGRATION_MARKER_TMP=""
 CODEX_MARKETPLACE_ERROR_TMP=""
 CODEX_MARKETPLACE_PATH_TMP=""
-LOCK_HELD=0
+CLAUDE_MARKETPLACE_PATH_TMP=""
+CLI_STATUS_TMP=""
 CLAUDE_AVAILABLE=0
 CODEX_AVAILABLE=0
 CLAUDE_MARKETPLACE_PATH=""
 CODEX_MARKETPLACE_PATH=""
 CLAUDE_STATE="missing"
 CODEX_STATE="missing"
+# shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
+LOCK_HELD=0
+INITIAL_REPO_POINTER_PRESENT=0
+INITIAL_MIGRATION_MARKER_PRESENT=0
 
 cleanup() {
   [ -z "$REPO_POINTER_TMP" ] || rm -f "$REPO_POINTER_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f "$MIGRATION_MARKER_TMP"
   [ -z "$CODEX_MARKETPLACE_ERROR_TMP" ] || rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
   [ -z "$CODEX_MARKETPLACE_PATH_TMP" ] || rm -f "$CODEX_MARKETPLACE_PATH_TMP"
+  [ -z "$CLAUDE_MARKETPLACE_PATH_TMP" ] || rm -f "$CLAUDE_MARKETPLACE_PATH_TMP"
+  [ -z "$CLI_STATUS_TMP" ] || rm -f "$CLI_STATUS_TMP"
   skills_lock_release
 }
 trap cleanup EXIT
@@ -290,6 +299,9 @@ install_claude_skills() {
     ok "Claude Code の dotfiles marketplace は登録済み"
   fi
 
+  CLAUDE_MARKETPLACE_PATH="$CLAUDE_MARKETPLACE"
+  record_claude_marketplace_path || return 1
+
   case "$CLAUDE_STATE" in
     enabled) ok "Claude Code の nozimin plugin はインストール済み" ;;
     disabled)
@@ -307,6 +319,92 @@ install_claude_skills() {
       ok "Claude Code の nozimin plugin をインストールしました"
       ;;
   esac
+}
+
+record_claude_marketplace_path() {
+  [ -n "$CLAUDE_MARKETPLACE_PATH" ] || return 0
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -e "$CLAUDE_MARKETPLACE_POINTER" ] || [ -L "$CLAUDE_MARKETPLACE_POINTER" ]; then
+    if [ ! -f "$CLAUDE_MARKETPLACE_POINTER" ] || [ -L "$CLAUDE_MARKETPLACE_POINTER" ]; then
+      error "$CLAUDE_MARKETPLACE_POINTER は通常ファイルではありません"
+      return 1
+    fi
+  fi
+  CLAUDE_MARKETPLACE_PATH_TMP="$(mktemp "$CONFIG_DIR/.claude-marketplace.XXXXXX")" || {
+    error "Claude marketplace path を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$CLAUDE_MARKETPLACE_PATH" >"$CLAUDE_MARKETPLACE_PATH_TMP" || return 1
+  mv "$CLAUDE_MARKETPLACE_PATH_TMP" "$CLAUDE_MARKETPLACE_POINTER" || {
+    error "Claude marketplace path を記録できませんでした"
+    return 1
+  }
+  CLAUDE_MARKETPLACE_PATH_TMP=""
+}
+
+record_cli_unused() {
+  local pointer="$1"
+  if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+    if [ ! -f "$pointer" ] || [ -L "$pointer" ]; then
+      error "$pointer は通常ファイルではありません"
+      return 1
+    fi
+    return 0
+  fi
+  CLI_STATUS_TMP="$(mktemp "$CONFIG_DIR/.cli-status.XXXXXX")" || {
+    error "未使用 CLI の状態を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf 'unused\n' >"$CLI_STATUS_TMP" || return 1
+  mv "$CLI_STATUS_TMP" "$pointer" || {
+    error "$pointer に未使用 CLI の状態を記録できませんでした"
+    return 1
+  }
+  CLI_STATUS_TMP=""
+}
+
+check_missing_cli_migrations() {
+  local cli pointer path repo_path
+  for cli in claude codex; do
+    case "$cli" in
+      claude)
+        [ "$CLAUDE_AVAILABLE" -eq 0 ] || continue
+        pointer="$CLAUDE_MARKETPLACE_POINTER"
+        ;;
+      codex)
+        [ "$CODEX_AVAILABLE" -eq 0 ] || continue
+        pointer="$CODEX_MARKETPLACE_POINTER"
+        ;;
+    esac
+    if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+      if [ ! -f "$pointer" ] || [ -L "$pointer" ]; then
+        error "$pointer は通常ファイルではありません。CLI の移行状態を確認できません"
+        return 1
+      fi
+      IFS= read -r path <"$pointer" || path=""
+      [ "$path" != unused ] || continue
+      if [ -z "$path" ]; then
+        error "$pointer に登録先がありません。CLI を PATH に戻して移行してください"
+        return 1
+      fi
+      if [ "$path" != "$CLAUDE_MARKETPLACE" ]; then
+        error "$cli の dotfiles marketplace は $path に登録済みですが CLI が見つかりません。CLI を PATH に戻してから移行を再実行してください"
+        return 1
+      fi
+    elif { [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" != "$REPO_ROOT" ]; } ||
+      [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
+      # Older releases did not track Claude's registration separately. A stale
+      # repo pointer or pending migration is enough evidence that this CLI may
+      # still use the old clone, so require it before changing the shared pointer.
+      repo_path=""
+      [ ! -f "$REPO_POINTER" ] || repo_path="$(cat "$REPO_POINTER")"
+      error "$cli の登録先を確認できません（repo pointer: ${repo_path:-不明}）。CLI を PATH に戻してから移行を再実行してください"
+      return 1
+    fi
+  done
 }
 
 codex_cache_executable_modes_match() {
@@ -408,6 +506,7 @@ else
 fi
 preflight_claude || exit 1
 preflight_codex || exit 1
+check_missing_cli_migrations || exit 1
 
 MIGRATION_REQUIRED=0
 if [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" != "$REPO_ROOT" ]; then
@@ -428,6 +527,12 @@ if [ "$MIGRATION_REQUIRED" -eq 1 ]; then
 fi
 
 prepare_repo_pointer || exit 1
+if [ -e "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
+  INITIAL_REPO_POINTER_PRESENT=1
+fi
+if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
+  INITIAL_MIGRATION_MARKER_PRESENT=1
+fi
 if [ "$MIGRATION_REQUIRED" -eq 1 ] || [ -n "$REPO_POINTER_TMP" ]; then
   begin_pointer_migration || exit 1
 fi
@@ -436,6 +541,17 @@ step "Claude Code"
 install_claude_skills || exit 1
 step "Codex"
 install_codex_skills || exit 1
+
+if [ "$CLAUDE_AVAILABLE" -eq 0 ] &&
+  [ "$INITIAL_REPO_POINTER_PRESENT" -eq 0 ] &&
+  [ "$INITIAL_MIGRATION_MARKER_PRESENT" -eq 0 ]; then
+  record_cli_unused "$CLAUDE_MARKETPLACE_POINTER" || exit 1
+fi
+if [ "$CODEX_AVAILABLE" -eq 0 ] &&
+  [ "$INITIAL_REPO_POINTER_PRESENT" -eq 0 ] &&
+  [ "$INITIAL_MIGRATION_MARKER_PRESENT" -eq 0 ]; then
+  record_cli_unused "$CODEX_MARKETPLACE_POINTER" || exit 1
+fi
 
 if [ -n "$REPO_POINTER_TMP" ]; then
   mv "$REPO_POINTER_TMP" "$REPO_POINTER" || {
