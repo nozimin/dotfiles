@@ -462,6 +462,8 @@ record_cli_unused() {
 
 check_missing_cli_migrations() {
   local cli pointer path repo_path
+  repo_path=""
+  [ ! -f "$REPO_POINTER" ] || repo_path="$(skills_repo_pointer_value "$REPO_POINTER")" || return 1
   for cli in claude codex; do
     case "$cli" in
       claude)
@@ -488,13 +490,11 @@ check_missing_cli_migrations() {
         error "$cli の dotfiles marketplace は $path に登録済みですが CLI が見つかりません。CLI を PATH に戻してから移行を再実行してください"
         return 1
       fi
-    elif { [ -f "$REPO_POINTER" ] && [ "$(skills_repo_pointer_value "$REPO_POINTER")" != "$REPO_ROOT" ]; } ||
+    elif { [ -n "$repo_path" ] && [ "$repo_path" != "$REPO_ROOT" ]; } ||
       [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
       # Older releases did not track Claude's registration separately. A stale
       # repo pointer or pending migration is enough evidence that this CLI may
       # still use the old clone, so require it before changing the shared pointer.
-      repo_path=""
-      [ ! -f "$REPO_POINTER" ] || repo_path="$(skills_repo_pointer_value "$REPO_POINTER")"
       error "$cli の登録先を確認できません（repo pointer: ${repo_path:-不明}）。CLI を PATH に戻してから移行を再実行してください"
       return 1
     fi
@@ -612,8 +612,10 @@ preflight_codex || exit 1
 check_missing_cli_migrations || exit 1
 validate_managed_config_roots || exit 1
 
+REPO_POINTER_VALUE=""
+[ ! -f "$REPO_POINTER" ] || REPO_POINTER_VALUE="$(skills_repo_pointer_value "$REPO_POINTER")" || exit 1
 MIGRATION_REQUIRED=0
-if [ -f "$REPO_POINTER" ] && [ "$(skills_repo_pointer_value "$REPO_POINTER")" != "$REPO_ROOT" ]; then
+if [ -n "$REPO_POINTER_VALUE" ] && [ "$REPO_POINTER_VALUE" != "$REPO_ROOT" ]; then
   MIGRATION_REQUIRED=1
 fi
 if { [ -n "$CLAUDE_MARKETPLACE_PATH" ] && [ "$CLAUDE_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; } ||
@@ -630,7 +632,7 @@ if [ "$MIGRATION_REQUIRED" -eq 1 ]; then
   }
 fi
 
-if [ -e "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
+if [ -n "$REPO_POINTER_VALUE" ]; then
   INITIAL_REPO_POINTER_PRESENT=1
 fi
 if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
