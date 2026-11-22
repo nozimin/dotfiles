@@ -150,10 +150,14 @@ stale_pointer_marketplace_path() {
   if OLD_MARKETPLACE="$old_marketplace" python3 - <<'PY'
 import json, os
 try:
-    with open(os.path.join(os.environ["OLD_MARKETPLACE"], ".claude-plugin", "marketplace.json"), encoding="utf-8") as f:
+    root = os.path.realpath(os.environ["OLD_MARKETPLACE"])
+    with open(os.path.join(root, ".claude-plugin", "marketplace.json"), encoding="utf-8") as f:
         manifest = json.load(f)
-    valid = (manifest.get("name") == "dotfiles" and
-             any(p.get("name") == "nozimin" for p in manifest.get("plugins", [])))
+    plugin = next(p for p in manifest.get("plugins", []) if p.get("name") == "nozimin")
+    source = plugin.get("source")
+    source_path = os.path.realpath(os.path.join(root, source)) if isinstance(source, str) and source else ""
+    valid = (manifest.get("name") == "dotfiles" and source_path.startswith(root + os.sep)
+             and os.path.isdir(source_path))
 except Exception:
     valid = False
 raise SystemExit(0 if valid else 1)
@@ -304,7 +308,11 @@ install_codex_skills() {
   ok "Codex の nozimin plugin をインストールまたは更新しました"
 }
 
-skills_lock_acquire || exit 1
+if [ "${DOTFILES_SETUP_LOCK_OWNER_PID:-}" = "$PPID" ] && skills_lock_is_owned_by "$PPID"; then
+  : # cmd/setup owns and releases the validated shared lock
+else
+  skills_lock_acquire || exit 1
+fi
 preflight_claude || exit 1
 preflight_codex || exit 1
 

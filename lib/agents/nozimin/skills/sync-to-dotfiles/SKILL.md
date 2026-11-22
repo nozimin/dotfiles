@@ -12,12 +12,12 @@ disable-model-invocation: true
 - 扱うのは `collect` が出す差分だけ。新しいツールを管理に加えるのは、起動時の引数か会話でユーザーが頼んだときだけ（「ツールの追加」）。
 - commit は `main` に直接行う。個人用の dotfiles なので、ブランチも PR も作らない（ユーザーが決めたこと）。
 - dotfiles のファイル操作や Git 操作は `~/.config/dotfiles/repo` のパスで行う。
-- 最初の `collect` が出す `=== repo` の `path` を `repo_path` として記録し、この実行で使い続ける。後続の `collect` には毎回 `--expect-repo "$repo_path"` を付ける。リポジトリやローカル設定を書き換える操作は、必ず `scripts/with-repo-lock "$repo_path" -- <command>` で実行する。この helper は実行直前に pointer と移行 marker を再検証し、installer の lock を保持して command を実行する。確認後に pointer が変わった、marker がある、または lock が取れない場合は何も書かずに止め、pointer を読み直して選択を続けず、collect と承認からやり直す。
-- この skill に同梱したスクリプトは `scripts/` にある。利用可能な skill の一覧に表示される `SKILL.md` の場所を基準に、相対パスで実行する。
+- 最初の `collect` が出す `=== repo` の `path` を `repo_path` として記録し、この実行で使い続ける。後続の `collect` には毎回 `--expect-repo "$repo_path"` を付ける。リポジトリやローカル設定を書き換える操作は、必ず `"$lock_script" "$repo_path" -- <command>` で実行する。この helper は実行直前に pointer と移行 marker を再検証し、installer の lock を保持して command を実行する。確認後に pointer が変わった、marker がある、または lock が取れない場合は何も書かずに止め、pointer を読み直して選択を続けず、collect と承認からやり直す。
+- この skill に同梱したスクリプトは `scripts/` にある。skill loader が示すこの `SKILL.md` の絶対パスから `skill_scripts`（同じディレクトリの `scripts/` の絶対パス）を求め、すべてのコマンドでその絶対パスを使う。helper は repo root へ `cd` してから command を起動するため、相対パスを渡さない。各 shell 呼び出しで `lock_script="$skill_scripts/with-repo-lock"` と `collect_script="$skill_scripts/collect"` を設定する。別々の Bash 呼び出しで変数が引き継がれない場合も、読み込まれた `SKILL.md` の絶対パスから作り直す。
 
 ## collect の出力
 
-`scripts/collect` は差分を標準出力に出す。読み取り専用で、書き込むのは `git fetch` だけ。`--no-fetch` を付けると fetch しない（fetch は 30 秒で打ち切る。ssh の origin では `BatchMode` と `ConnectTimeout` を付けるが、`GIT_SSH_COMMAND` `GIT_SSH` `core.sshCommand` をユーザーが決めていればそれを使う）。終了コード 1 は、出力できなかったことを表す。別の操作（本文の取り出し、作業ツリーとの比較、範囲の確認と削除）は、サブモード（下の「collect のサブモード」）で行う。
+`"$collect_script"` は差分を標準出力に出す。読み取り専用で、書き込むのは `git fetch` だけ。`--no-fetch` を付けると fetch しない（fetch は 30 秒で打ち切る。ssh の origin では `BatchMode` と `ConnectTimeout` を付けるが、`GIT_SSH_COMMAND` `GIT_SSH` `core.sshCommand` をユーザーが決めていればそれを使う）。終了コード 1 は、出力できなかったことを表す。別の操作（本文の取り出し、作業ツリーとの比較、範囲の確認と削除）は、サブモード（下の「collect のサブモード」）で行う。
 
 dotfiles 側は `HEAD` の `lib/Brewfile` と `lib/zshrc` と比べる。作業ツリーの未コミットの変更は `lib` の項目として別に出るので、未コミットの変更にしかない行は「dotfiles にある」にならない（`in-dotfiles` が立たず、Brewfile の項目も出る）。
 
@@ -75,9 +75,14 @@ dotfiles 側は `HEAD` の `lib/Brewfile` と `lib/zshrc` と比べる。作業�
 `~/.config/dotfiles/repo` から `repo_path` を読み、出力は一時ファイルに残す（4 の commit の後で段落を消すときに、サブモードがこのファイルから `body` を取り出して照らし合わせるため）。最初の読み取りと `collect` は helper の lock 内で行い、出力の `=== repo` `path` が `repo_path` と一致することを確かめる。これをこの実行の承認対象に固定する。終了コード 1 なら、エラーを伝えて止める。
 
 ```sh
+# Replace this value with the absolute SKILL.md path supplied by the skill loader.
+skill_file="<absolute path to this loaded SKILL.md>"
+skill_scripts="$(cd "$(dirname "$skill_file")/scripts" && pwd -P)" || exit 1
+lock_script="$skill_scripts/with-repo-lock"
+collect_script="$skill_scripts/collect"
 repo_path="$(cat "$HOME/.config/dotfiles/repo")"
 out="$(mktemp)"
-if ! scripts/with-repo-lock "$repo_path" -- scripts/collect --expect-repo "$repo_path" > "$out"; then echo "collect に失敗しました: $out"; exit 1; fi
+if ! "$lock_script" "$repo_path" -- "$collect_script" --expect-repo "$repo_path" > "$out"; then echo "collect に失敗しました: $out"; exit 1; fi
 reported_repo="$(awk '$0 == "=== repo" { in_repo=1; next } /^===/ { in_repo=0 } in_repo && /^path: / { sub(/^path: /, ""); print; exit }' "$out")"
 [ "$reported_repo" = "$repo_path" ] || { echo "collect の repo path が pointer と一致しません"; exit 1; }
 echo "出力: $out repo: $repo_path"
@@ -89,7 +94,7 @@ cat "$out"
 - `branch` が `main` でなければ止め、`main` で起動し直すよう伝える。
 - `dirty` があれば止め、そのファイルを伝える（commit か破棄をしてから起動し直す）。
 - `behind` が 1 以上なら、AskUserQuestion で `git pull --ff-only` するかを聞く。おすすめは「pull する」。
-  - pull は `scripts/with-repo-lock "$repo_path" -- git -C "$repo_path" pull --ff-only` で実行する。pull したら `scripts/collect --expect-repo "$repo_path" --no-fetch` を実行し直し、その出力で続ける（出力は同じように一時ファイルに残し、以後はそのファイルを使う）。
+  - pull は `"$lock_script" "$repo_path" -- git -C "$repo_path" pull --ff-only` で実行する。pull したら `"$collect_script" --expect-repo "$repo_path" --no-fetch` を実行し直し、その出力で続ける（出力は同じように一時ファイルに残し、以後はそのファイルを使う）。
   - pull が失敗したら（ローカルと origin が分岐しているなど）、止めて伝える。
   - pull しないなら、最後の push が拒否されうることを伝えて続ける。
 - `behind` が `unknown` なら、origin と比べられなかったことを伝え、AskUserQuestion で続けるかを聞く。
@@ -198,7 +203,7 @@ zsh の項目はフラグで決める。フラグが複数あれば、表の上�
 
 選択ごとに、次の順に行う。
 
-書き込み前に、元の `repo_path` を必ず `scripts/with-repo-lock "$repo_path" -- <command>` に渡す。repo 内の編集、`git restore` / `rm` / `git add` / `git commit` / `git pull` / `git push`、`~/.config/dotfiles/ignore` への追記、`~/.zshrc` / `~/.zprofile` のバックアップと置き換えはすべて対象。ファイル編集ツールから直接 repo を書かず、patch や一時出力を作って helper の中で適用する。複数行の処理は helper 経由の `bash -s` に heredoc を渡す。helper が pointer 変更や移行を検出して失敗したら、そのコマンドは実行されていない。選択を引き継がず、collect からやり直す。
+書き込み前に、元の `repo_path` を必ず `"$lock_script" "$repo_path" -- <command>` に渡す。repo 内の編集、`git restore` / `rm` / `git add` / `git commit` / `git pull` / `git push`、`~/.config/dotfiles/ignore` への追記、`~/.zshrc` / `~/.zprofile` のバックアップと置き換えはすべて対象。ファイル編集ツールから直接 repo を書かず、patch や一時出力を作って helper の中で適用する。複数行の処理は helper 経由の `bash -s` に heredoc を渡す。helper が pointer 変更や移行を検出して失敗したら、そのコマンドは実行されていない。選択を引き継がず、collect からやり直す。
 
 1. `lib` の破棄
 2. Brewfile と zsh の取り込み（共通化、dotfiles から削除）
@@ -208,7 +213,7 @@ zsh の項目はフラグで決める。フラグが複数あれば、表の上�
 
 リポジトリで変えたファイル（取り込み先と dotfiles から削除したファイル、commit を選んだ `lib` の項目のパス）を、エリアごとに覚えておく。4 で commit するのはこのファイルだけ。
 
-- **破棄（lib）**: `id` の `lib:` の後ろのパスを、`body` の先頭が `(未追跡のファイル)` なら `scripts/with-repo-lock "$repo_path" -- rm -- "$repo_path/<パス>"` で削除し、それ以外なら `scripts/with-repo-lock "$repo_path" -- git -C "$repo_path" restore --source=HEAD --staged --worktree -- <パス>` で `HEAD` に戻す。`lib/com.googlecode.iterm2.plist` を破棄するときは、iTerm2 が起動中だと終了時に設定が書き戻されることを伝える。
+- **破棄（lib）**: `id` の `lib:` の後ろのパスを、`body` の先頭が `(未追跡のファイル)` なら `"$lock_script" "$repo_path" -- rm -- "$repo_path/<パス>"` で削除し、それ以外なら `"$lock_script" "$repo_path" -- git -C "$repo_path" restore --source=HEAD --staged --worktree -- <パス>` で `HEAD` に戻す。`lib/com.googlecode.iterm2.plist` を破棄するときは、iTerm2 が起動中だと終了時に設定が書き戻されることを伝える。
 - **共通化（Brewfile）**: `lib/Brewfile` の合うセクションの末尾に `brew "<名前>"` / `cask "<名前>"` / `tap "<名前>"` を足す。名前は `body` のまま書く（サードパーティの tap のものは完全な名前で出るので、短くしない。短い名前だと新しい Mac の `brew bundle` が失敗する）。formula は `# CLI`、アプリの cask は `# アプリ`、フォントの cask は `# フォント`。合うセクションが無ければ（`tap` など）コメント付きのセクションを足す。`tap` のセクションは先頭に置く。作業ツリーの `lib/Brewfile` に同じ名前の行が既にあれば（この回に commit する未コミットの変更で足してある）、足さない（二重に入るため）。
 - **dotfiles から削除**: `lib/Brewfile` からその行を消す。作業ツリーに行が無ければ（未コミットの変更で消してある）、何もしない。
 - **共通化（zsh）**: 段落を `lib/zshrc` に足す。
@@ -230,8 +235,8 @@ zsh の項目はフラグで決める。フラグが複数あれば、表の上�
 
 zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決めるときに使う。`$out` は 1 で残した collect の出力のファイル（シェルの変数は Bash の呼び出しをまたいで残らないので、覚えたパスを書く）。
 
-  - **本文**: 足す内容は、表で見せた `body` を使う。ファイルに取り出したいときは `scripts/collect --expect-repo "$repo_path" --body "$out" zshrc 12-15 > <ファイル>`。「kind と lines が合う項目がありません」と出たら、`kind` か `lines` の書き間違い。
-  - **作業ツリーの `lib/zshrc` にあるか**: 段落のコメントでない行の並びが、作業ツリーの `lib/zshrc` のトップレベルに、同じ順で連続して現れるかを `scripts/collect --expect-repo "$repo_path" --in-worktree "$out" zshrc 12-15` で見る（`yes` か `no`）。`in-dotfiles` と同じ比べ方を、`HEAD` の代わりに作業ツリーにしたもの（前後の空白を除いて比べる。一部の行だけが別々の場所にあるものや、`if` の中の同じ行は `no`）。
+  - **本文**: 足す内容は、表で見せた `body` を使う。ファイルに取り出したいときは `"$collect_script" --expect-repo "$repo_path" --body "$out" zshrc 12-15 > <ファイル>`。「kind と lines が合う項目がありません」と出たら、`kind` か `lines` の書き間違い。
+  - **作業ツリーの `lib/zshrc` にあるか**: 段落のコメントでない行の並びが、作業ツリーの `lib/zshrc` のトップレベルに、同じ順で連続して現れるかを `"$collect_script" --expect-repo "$repo_path" --in-worktree "$out" zshrc 12-15` で見る（`yes` か `no`）。`in-dotfiles` と同じ比べ方を、`HEAD` の代わりに作業ツリーにしたもの（前後の空白を除いて比べる。一部の行だけが別々の場所にあるものや、`if` の中の同じ行は `no`）。
 
 #### ローカルから消す
 
@@ -264,7 +269,7 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
 
    ```sh
    # ~/.zshrc の 5-7 行目の段落。zshrc-block が 20-22 なので 8-19 行目を見る。この回に ~/.zshrc から消す 12-13 と 15-16 は除く
-   scripts/collect --expect-repo "$repo_path" --between ~/.zshrc 8 19 12-13 15-16
+   "$collect_script" --expect-repo "$repo_path" --between ~/.zshrc 8 19 12-13 15-16
    ```
 
    - `~/.zshrc` のブロックより後ろの段落: `--between ~/.zshrc <zshrc-block の終わり + 1> <lines の開始 - 1>` で `~/.zshrc` を見る。
@@ -289,14 +294,14 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
 1. 消す段落の `lines` の範囲の内容が `body` と一致することを確かめる。`collect --check` に、1 で残した出力のファイル、`kind`、ファイル、消す段落の `lines` をすべて渡す（範囲ごとに `一致` か `不一致` が出る。中身は出ない）。
 
    ```sh
-   scripts/collect --expect-repo "$repo_path" --check "$out" zshrc ~/.zshrc 12-15 30-31
+   "$collect_script" --expect-repo "$repo_path" --check "$out" zshrc ~/.zshrc 12-15 30-31
    ```
 
    1 つでも不一致なら（終了コード 1）、collect を実行した後にファイルが変わっている。ファイルを書き換えずに、3 で `zsh -n` が通らないときと同じように流れ全体を止める（collect を実行し直して、もう一度選んでもらう必要がある）。
 2. 段落を除いた内容を一時ファイル（`mktemp`）に作る。`collect --without` に、消す段落の `lines` をすべて渡し、標準出力を一時ファイルにリダイレクトする（まとめて除くので、順番も行番号のずれも気にしなくてよい。消した段落の前後の空行は重なって残るが、内容には影響しない）。元のファイルは書き換わらない。
 
    ```sh
-   tmp="$(mktemp)"; scripts/collect --expect-repo "$repo_path" --without ~/.zshrc 12-15 30-31 > "$tmp"
+   tmp="$(mktemp)"; "$collect_script" --expect-repo "$repo_path" --without ~/.zshrc 12-15 30-31 > "$tmp"
    ```
 
 3. `zsh -n <一時ファイル>` で構文を確かめる。通らなければ（段落の境目が `if` や関数の途中にあるなど）、ファイルを書き換えずに流れ全体を止める（残りのファイル、4 の最後の collect での確認、5 の push に進まない。4 の commit は済んでいる）。エラーの内容、そのファイルは書き換えていないこと、ここまでに済んだこと（commit したもの、まだ push していないこと）を伝え、ターンを終えてユーザーの指示を待つ。元のファイルも `zsh -n` で確かめ、元から通らないならそのことも伝える。
@@ -304,7 +309,7 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
 5. 消すなら、バックアップと書き換えを同じ lock 内で行う。退避先を伝える。
 
    ```sh
-   scripts/with-repo-lock "$repo_path" -- bash -s -- "<ファイル>" "<一時ファイル>" <<'SH'
+   "$lock_script" "$repo_path" -- bash -s -- "<ファイル>" "<一時ファイル>" <<'SH'
    file="$1"; tmp="$2"
    cp -p "$file" "$file.backup-$(date +%Y%m%d%H%M%S)"
    cat "$tmp" > "$file"
@@ -320,7 +325,7 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
 - `id` には `$` や引用符が入るので、展開しない形（`<<'EOF'`）で書く。`id` の行と `EOF` の行は字下げしない（`EOF` の行が字下げされているとヒアドキュメントが閉じず、`id` の先頭にも空白が入って一致しなくなる）。
 
 ```sh
-scripts/with-repo-lock "$repo_path" -- bash -s <<'SH'
+"$lock_script" "$repo_path" -- bash -s <<'SH'
 f="${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}"
 mkdir -p "$(dirname "$f")"
 if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then echo >> "$f"; fi
@@ -337,25 +342,25 @@ SH
 
 commit するかは、3 でリポジトリのファイルを変えたか（取り込み、dotfiles から削除、`lib` の commit）で決める。変えたものが無ければ、commit を飛ばして 3 の「ローカルから消す」に進む。保留にした `lib` の変更（iTerm2 の plist など）は残るので、`git status` が空かどうかでは決めない。
 
-1. 3 で覚えたファイルの差分を、`scripts/collect --expect-repo "$repo_path" --diff <パス>...` で見せる（未追跡のファイルは中身が出る）。生の `git diff` は使わない（消された行や文脈の行にある秘密の値が、チャットに出るため。`collect --diff` は、秘密と判定した値を `***` にして出す）。plist は変更の要約が出るので、長ければ抜粋し、全文は聞かれたら見せる（`git -C "$repo_path" diff --stat -- <パス>` は見せてよい）。AskUserQuestion で commit するかを確認する。
+1. 3 で覚えたファイルの差分を、`"$collect_script" --expect-repo "$repo_path" --diff <パス>...` で見せる（未追跡のファイルは中身が出る）。生の `git diff` は使わない（消された行や文脈の行にある秘密の値が、チャットに出るため。`collect --diff` は、秘密と判定した値を `***` にして出す）。plist は変更の要約が出るので、長ければ抜粋し、全文は聞かれたら見せる（`git -C "$repo_path" diff --stat -- <パス>` は見せてよい）。AskUserQuestion で commit するかを確認する。
 2. エリアごとに 1 commit にする（Brewfile、zsh、`lib/` の変更はファイルごと）。そのエリアのファイルだけを `main` に直接 commit する。`git commit` にパスを付け、ほかに stage されているもの（保留にした `lib` の変更など）を含めない。未追跡のファイルは `git add` しないと `git commit -- <パス>` が失敗するので、先に `git add` する:
 
    ```sh
-   scripts/with-repo-lock "$repo_path" -- git -C "$repo_path" add -- <パス>...
-   scripts/with-repo-lock "$repo_path" -- git -C "$repo_path" commit -m '<メッセージ>' -- <パス>...
+   "$lock_script" "$repo_path" -- git -C "$repo_path" add -- <パス>...
+   "$lock_script" "$repo_path" -- git -C "$repo_path" commit -m '<メッセージ>' -- <パス>...
    ```
 
 3. メッセージは `[feat]` `[fix]` `[del]` + 日本語の要約。例: `[feat] Brewfile に actionlint などを追加`、`[feat] zshrc に rbenv の初期化を追加`、`[del] Brewfile から gitkraken を削除`、`[feat] iTerm2 の設定を更新`。
 
 commit を断ったり失敗したりしたら（フックで止まったなど）、そのことを伝え、そのエリアのファイルは commit せずに残す。`lib/zshrc` の commit なら、`in-dotfiles` でない段落はローカルから消さない（「ローカルから消す」の「commit」）。ほかのエリアの commit と、ローカルから消す手順は続ける。
 
-commit を終えたら（飛ばしたときも）、3 の「ローカルから消す」の手順で段落を消す。その後 `scripts/collect --expect-repo "$repo_path" --no-fetch` を実行し直し、残っている項目が、保留・残すにしたもの、commit を断ったか失敗したもの（そのファイルの `lib` の項目と、取り込んだ段落）、ローカルから消さなかった段落（`zshrc-sources-lib` が `yes` でなかったもの、作業ツリーの `lib/zshrc` に無かった `in-dotfiles` のもの、実行順や `diff -U0` の確認で断ったもの）だけであることを確かめる。
+commit を終えたら（飛ばしたときも）、3 の「ローカルから消す」の手順で段落を消す。その後 `"$collect_script" --expect-repo "$repo_path" --no-fetch` を実行し直し、残っている項目が、保留・残すにしたもの、commit を断ったか失敗したもの（そのファイルの `lib` の項目と、取り込んだ段落）、ローカルから消さなかった段落（`zshrc-sources-lib` が `yes` でなかったもの、作業ツリーの `lib/zshrc` に無かった `in-dotfiles` のもの、実行順や `diff -U0` の確認で断ったもの）だけであることを確かめる。
 
 ### 5. push
 
 ツールの追加を頼まれていれば、先に「ツールの追加」を行う。
 
-push するもの（1 の `ahead` が 1 以上か `unknown`、またはこの実行でした commit）が無ければ、push の確認を飛ばして終わる。あれば、AskUserQuestion で `origin main` に push するかを聞く。おすすめは「push する」。push するなら `scripts/with-repo-lock "$repo_path" -- git -C "$repo_path" push origin main`。拒否されたら（origin が先に進んでいるなど）、そのことを伝えて止める。
+push するもの（1 の `ahead` が 1 以上か `unknown`、またはこの実行でした commit）が無ければ、push の確認を飛ばして終わる。あれば、AskUserQuestion で `origin main` に push するかを聞く。おすすめは「push する」。push するなら `"$lock_script" "$repo_path" -- git -C "$repo_path" push origin main`。拒否されたら（origin が先に進んでいるなど）、そのことを伝えて止める。
 
 ## ツールの追加
 
@@ -366,11 +371,11 @@ push するもの（1 の `ahead` が 1 以上か `unknown`、またはこの実
    - Mac ごとの値や秘密情報が混ざるファイルは、ツールの include 機能を使う（例: git は `~/.gitconfig` に `[include] path = <リポジトリ>/lib/gitconfig`）。シンボリックリンクにすると、秘密情報を除いた内容でローカルのファイルが置き換わるため。共通の部分だけを `lib/` に置き、ローカルのファイルに残りを残す。
    - ツールが設定を書き換えるときに、リンクを保つか（普通のファイルに置き換えないか）を、ドキュメントや既知の issue で確かめる。保たないなら include など別の方式にする。
 2. **README の「ツールを追加する」の手順で足す**:
-   - 設定ファイル（include 方式なら共通の部分）を `lib/` にコピーする。コピーは `scripts/with-repo-lock "$repo_path" -- cp -p "<元ファイル>" "$repo_path/lib/<ファイル>"` で行う。元のファイルはそのまま残す（シンボリックリンクなら 4 で置き換わる）。秘密情報（「おすすめの決め方」の `secret` に当たる行）と `garbage` に当たる行は `lib/` に入れない。秘密情報があるファイルは、1 で include 方式にする。ファイルの中身を見せるときは、秘密の値を `***` に置き換える。
+   - 設定ファイル（include 方式なら共通の部分）を `lib/` にコピーする。コピーは `"$lock_script" "$repo_path" -- cp -p "<元ファイル>" "$repo_path/lib/<ファイル>"` で行う。元のファイルはそのまま残す（シンボリックリンクなら 4 で置き換わる）。秘密情報（「おすすめの決め方」の `secret` に当たる行）と `garbage` に当たる行は `lib/` に入れない。秘密情報があるファイルは、1 で include 方式にする。ファイルの中身を見せるときは、秘密の値を `***` に置き換える。
    - `cmd/setup` に冪等な `setup_<tool>` を足し、末尾の手順の並びに `step` と呼び出しを足す（`setup_starship` のように `cmd/common.sh` の `is_linked` / `link_file` を使う）。
    - `lib/<tool>.md` を書き、README の表に 1 行足す。
 3. **collect に検出を足す**: include 方式のように `lib` の変更として出てこないものは、そのツールの差分を集める処理を `collect` に足し、ほかの項目と同じ `=== item` の形式で出す（`kind` は新しい名前、`id` は `<kind>:<識別子>`）。`shellcheck` を通す。VS Code を加えるときは、Brewfile の `vscode` 行（拡張機能）の検出もここで足す。
-4. **setup を実行してもらう**: ユーザーに別のターミナル（Terminal.app）で `<リポジトリの絶対パス>/cmd/setup` を実行してもらう。スキル内から実行すると、`cmd/setup` の `ask_yes_no` に答えられず、入力の終わり（EOF）が No として扱われてすべてスキップされるため。実行前に pointer が記録済みの `repo_path` と一致し、移行 marker がないことを確かめる。一致しない場合は setup を実行せず、collect と選択からやり直す。
+4. **setup を実行してもらう**: スキル内から実行すると、`cmd/setup` の `ask_yes_no` に答えられず、入力の終わり（EOF）が No として扱われてすべてスキップされる。ユーザーに別のターミナル（Terminal.app）で `<repo_path>/cmd/setup --expect-repo "<repo_path>"` を実行してもらう。この checked mode は shared lock 内で repo pointer と移行 marker を検証してから設定を変更し、setup 内の `install_skills` はその lock を検証して借りる。pointer が変わっている場合は設定を変更せずに終了するので、collect と選択からやり直す。
    - 絶対パスは `git rev-parse --show-toplevel` で求め、コピーしてそのまま実行できるコマンドの形で伝える。ターンを終え、終わったと言われるのを待つ。
    - 終わったと言われたら、ローカルのファイルがリンク（または include）に切り替わったことを `ls -l` などで確かめる。切り替わっていなければ、`cmd/setup` の最後に出たスキップと失敗を聞き、直してからもう一度実行してもらう。
 5. **commit**: 流れの 4 と同じやり方（`git add <パス>...` の後に `git commit -m '<メッセージ>' -- <パス>...`）で、ツールごとに 1 commit にする（例: `[feat] VS Code の設定を管理に加える`）。その後、流れの 5 の push の確認に戻る。

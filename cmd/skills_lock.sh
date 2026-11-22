@@ -60,3 +60,16 @@ skills_lock_release() {
     LOCK_HELD=0
   fi
 }
+
+# 子 installer が setup の lock を借りる場合、owner PID/host と live lock を再確認する。
+skills_lock_is_owned_by() {
+  local expected_pid="$1" lock_host owner_pid owner_host
+  [ -d "$INSTALL_LOCK_DIR" ] && [ ! -L "$INSTALL_LOCK_DIR" ] &&
+    [ -f "$INSTALL_LOCK_DIR/owner" ] && [ ! -L "$INSTALL_LOCK_DIR/owner" ] || return 1
+  owner_pid="$(sed -n '1p' "$INSTALL_LOCK_DIR/owner")"
+  owner_host="$(sed -n '2p' "$INSTALL_LOCK_DIR/owner")"
+  case "$expected_pid" in
+    ''|0|*[!0-9]*) return 1 ;;
+  esac
+  [ "$owner_pid" = "$expected_pid" ] && [ "$owner_host" = "$(hostname)" ] && kill -0 "$expected_pid" 2>/dev/null
+}

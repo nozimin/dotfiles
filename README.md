@@ -50,7 +50,7 @@ Codex CLI:  `$nozimin:sync-to-dotfiles`（`/skills` の一覧から選択）
 - Brewfile、`~/.zshrc` / `~/.zprofile`、`lib/` の未コミットの変更について、dotfiles との差分が番号付きの表で出る。各項目のおすすめ（共通化／ローカル専用／保留）を見て、変えたい番号だけ答える。
 - 選んだものを `lib/` に反映し、`main` に commit する。push するかは最後に確認される。
 - ツールを新しく管理に加えたいときは、引数で伝える（例: `/nozimin:sync-to-dotfiles VS Code も入れて` または `$nozimin:sync-to-dotfiles VS Code も入れて`）。
-- ツールを追加した後は `cmd/setup` を実行し直す。ほかの Mac では `git pull` してから実行する。
+- ツールを追加した後は `cmd/setup` を実行し直す。Agent Skill から別ターミナルでの実行を案内された場合は、提示された `--expect-repo <確認済みrepo path>` 付きのコマンドを使う。ほかの Mac では `git pull` してから実行する。
 
 「ローカル専用」にした項目は除外リスト `~/.config/dotfiles/ignore` に追記され、次から表に出なくなる。Mac ごとのファイルで、リポジトリには入れない。
 
