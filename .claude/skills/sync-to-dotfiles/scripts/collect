@@ -1237,7 +1237,9 @@ mode_diff() {
       lib/*) ;;
       *) fatal "lib/ の下のパスだけ指定できます: $path" ;;
     esac
-    entry="$(repo_git status --porcelain --no-renames --untracked-files=all -- "$path" | head -n 1)"
+    # read_status と同じく -z で読む（なしだと空白を含むパスが引用符付きで返り、lib_summary がファイルを見つけられない）。先頭の 1 件だけ取る
+    entry=""
+    IFS= read -r -d '' entry < <(repo_git status --porcelain -z --no-renames --untracked-files=all -- "$path") || true
     [ -n "$entry" ] || { printf '=== %s\n(HEAD との差分はありません)\n' "$path"; continue; }
     lib_summary "$entry"
     flags="${FLAGS#,}"
