@@ -1,7 +1,7 @@
 # sync-to-dotfiles 仕様書
 
-この Mac の設定と dotfiles リポジトリの差分を集め、共通化したいものだけを dotfiles に取り込む Claude Code の skill。
-`cmd/setup`（dotfiles → この Mac）と逆向きの入口。
+この Mac の設定と dotfiles リポジトリの差分を集め、共通化したいものだけを dotfiles に取り込む Agent Skill。Claude Code と Codex は同じ plugin copy を使う。
+`cmd/setup`（dotfiles → この Mac）と逆向きの入口。実行時の repo は `~/.config/dotfiles/repo` から読み、canonical absolute path のみ受け付ける。
 
 ## 1. 範囲
 
@@ -13,20 +13,21 @@
 ## 2. ファイル構成
 
 ```
-.claude/skills/sync-to-dotfiles/
+lib/agents/nozimin/skills/sync-to-dotfiles/
   SKILL.md         流れ、判断のルール、表の出し方、反映の手順
   scripts/collect  差分を集めて決まった形式で出す（bash、実行権限付き）
 ```
 
+- この場所を Claude Code 形式 plugin `nozimin` として Claude Code / Codex にインストールする。追加・変更後は `cmd/install_skills` を実行して Codex の cache を更新する。
 - 言語は日本語（SKILL.md、collect のコメントとメッセージ）。既存の `cmd/setup` と `cmd/common.sh` の書き方に合わせる。
-- `collect` は読み取り専用。書き込みは `git fetch` だけ。ファイルの編集、commit、push は SKILL.md の手順で Claude が行う。
-- `collect` には、SKILL.md が Claude に `awk` / `sed` を手で書かせずに済むよう、読み取り専用のサブモードがある（§5.2）。どれも結果を標準出力だけに出し、ファイルの中身（秘密を含みうる）を画面に出さない形にする。SKILL.md はこれらを呼ぶだけにし、collect の `LC_ALL=C` と食い違うロケールの `awk` / `sed` を手順に書かない。
+- `collect` は読み取り専用。書き込みは `git fetch` だけ。ファイルの編集、commit、push は SKILL.md の手順で Agent が行う。
+- `collect` には、SKILL.md が Agent に `awk` / `sed` を手で書かせずに済むよう、読み取り専用のサブモードがある（§5.2）。どれも結果を標準出力だけに出し、ファイルの中身（秘密を含みうる）を画面に出さない形にする。SKILL.md はこれらを呼ぶだけにし、collect の `LC_ALL=C` と食い違うロケールの `awk` / `sed` を手順に書かない。
 
 ## 3. 起動
 
-- frontmatter: `name: sync-to-dotfiles`、`disable-model-invocation: true`、`argument-hint`（例: `[追加したいツール]`）、description は日本語。
-- `/sync-to-dotfiles` で手動起動したときだけ動く。dotfiles リポジトリで Claude Code を起動して使う。
-- 引数（任意）: 管理に加えたいツール（例: `/sync-to-dotfiles VS Code も入れて`）。引数なしなら差分の確認だけ。
+- frontmatter: `name: sync-to-dotfiles`、`disable-model-invocation: true`、`argument-hint`（例: `[追加したいツール]`）、description は日本語。Codex の `agents/openai.yaml` でも implicit invocation を無効にする。
+- Claude Code では `/nozimin:sync-to-dotfiles`、Codex CLI では `/skills` の一覧から `$nozimin:sync-to-dotfiles` を選んで手動起動する。どちらも明示的に呼び出したときだけ動く。
+- 引数（任意）: 管理に加えたいツール（例: `/nozimin:sync-to-dotfiles VS Code も入れて` または `$nozimin:sync-to-dotfiles VS Code も入れて`）。引数なしなら差分の確認だけ。
 
 ## 4. collect が集めるもの
 
@@ -52,7 +53,7 @@
 
 ## 5. collect の出力形式
 
-標準出力に次のブロックを順に出す。Claude が読む前提なので、毎回同じ形式にする。
+標準出力に次のブロックを順に出す。Agent が読む前提なので、毎回同じ形式にする。
 
 ```
 === repo
@@ -97,7 +98,7 @@ ignored: 1
 - オプション: `--no-fetch`（`git fetch` しない。`behind` と `ahead` はローカルの追跡ブランチで数える）。
 - `git fetch` は固まらないように区切る。全体を 30 秒（環境変数 `COLLECT_FETCH_TIMEOUT` で変えられる）で打ち切る（macOS には `timeout` が標準で無いので、`timeout`、`gtimeout`、`perl` の `alarm` の順に使い、どれも無ければ次のオプションだけにする）。パスワードの入力は待たず（`GIT_TERMINAL_PROMPT=0`）、HTTP は転送が止まれば切る（`http.lowSpeedLimit` `http.lowSpeedTime`）。ssh は、ユーザーが `GIT_SSH_COMMAND`、`GIT_SSH`、`core.sshCommand` のどれも決めていないときだけ `GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10'` を付ける（決めているものは、ssh 以外のコマンドかもしれず、上書きすると設定が変わるため、そのまま使い、全体の打ち切りだけで守る）。打ち切りは fetch の失敗と同じに扱う（`behind` と `ahead` は `unknown`、`warn` を出す）。
 - テストのために `HOME` と `PATH` を差し替えて動くようにする（`~` は `$HOME` で解決し、brew は `PATH` から探して、無ければ `load_brew` で探す。そのため brew が標準の場所にある Mac では、brew が無い状態はテストで作れない）。除外リストの場所は環境変数 `DOTFILES_IGNORE_FILE` で差し替えられる。
-- リポジトリの場所は collect 自身の場所から求める（`.claude/skills/sync-to-dotfiles/scripts/` の 4 つ上）。
+- リポジトリの場所は `~/.config/dotfiles/repo` から解決する。Codex の plugin cache や移動済み clone から起動しても同じ登録先を使う。`=== repo` ブロックの `path:` に解決先を出す。
 - 終了コード: 出力できたら 0。リポジトリが見つからないなど、出力できなかったら 1。
 
 ### 5.1 `lib` の要約
@@ -210,11 +211,11 @@ ignored: 1
 
 「ローカルの変更を取り込む」節を足す:
 
-- dotfiles リポジトリで Claude Code を起動し、`/sync-to-dotfiles` を実行する。ツールを管理に加えたいときは引数で伝える。
+- dotfiles リポジトリで Agent を起動し、Claude Code では `/nozimin:sync-to-dotfiles`、Codex CLI では `/skills` の一覧から `$nozimin:sync-to-dotfiles` を選ぶ。ツールを管理に加えたいときは引数で伝える。
 - 除外リストの場所（`~/.config/dotfiles/ignore`）と形式。
 - 新しいツールを追加した後は `cmd/setup` を実行し直す。
 
-「構成」に `.claude/skills/sync-to-dotfiles/` を足す。
+「構成」に `lib/agents/nozimin/skills/sync-to-dotfiles/` を足す。
 
 ## 10.1 既知の制限
 

@@ -1,10 +1,55 @@
 #!/bin/bash
 # Mac の開発環境をまとめてセットアップする。
 # 何度実行しても、済んでいる手順は質問せずにスキップする。
+# 用法: cmd/setup [--expect-repo <確認済みrepo path>]
 # shellcheck disable=SC2088 # メッセージ中の ~ は表示用
 
-# shellcheck source=cmd/common.sh
+# shellcheck source=cmd/common.sh disable=SC1091
 source "$(dirname "$0")/common.sh"
+# shellcheck source=cmd/skills_common.sh disable=SC1091
+source "$(dirname "$0")/skills_common.sh"
+# shellcheck source=cmd/skills_lock.sh disable=SC1091
+source "$(dirname "$0")/skills_lock.sh"
+
+EXPECTED_REPO=""
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -ne 2 ] || [ "$1" != "--expect-repo" ]; then
+    error "使い方: cmd/setup [--expect-repo <確認済みrepo path>]"
+    exit 2
+  fi
+  EXPECTED_REPO="$2"
+fi
+
+# Tool-add handoff mode protects the delay between approval and a later Terminal.app launch.
+if [ -n "$EXPECTED_REPO" ]; then
+  CONFIG_DIR="$HOME/.config/dotfiles"
+  # shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
+  INSTALL_LOCK_DIR="$CONFIG_DIR/install_skills.lock"
+  # shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
+  LOCK_HELD=0
+  skills_lock_acquire || exit 1
+  trap skills_lock_release EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  EXPECTED_REPO="$(cd "$EXPECTED_REPO" 2>/dev/null && pwd -P)" || {
+    error "確認済み repo が見つかりません"
+    exit 1
+  }
+  [ "$EXPECTED_REPO" = "$REPO_ROOT" ] || {
+    error "確認済み repo ($EXPECTED_REPO) と setup の repo ($REPO_ROOT) が異なります"
+    exit 1
+  }
+  skills_repo_pointer_matches "$CONFIG_DIR/repo" "$EXPECTED_REPO" || {
+    error "repo pointer を確認できません。権限と内容を確認して手動で修復してください。設定を変更せず終了します"
+    exit 1
+  }
+  [ ! -e "$CONFIG_DIR/repo.migrating" ] && [ ! -L "$CONFIG_DIR/repo.migrating" ] || {
+    error "repo 移行中です。設定を変更せず終了します"
+    exit 1
+  }
+  DOTFILES_SETUP_LOCK_OWNER_PID="$$"
+  export DOTFILES_SETUP_LOCK_OWNER_PID
+fi
 
 FAILED=()
 SKIPPED=()
@@ -155,6 +200,20 @@ setup_git_user() {
   fi
 }
 
+# Claude Code と Codex の両方で plugin が有効か確認する。
+setup_skills() {
+  local status
+  if skills_setup_step; then
+    return
+  else
+    status=$?
+  fi
+  case "$status" in
+    2) skip "skills" ;;
+    *) fail "skills" "plugin の確認または cmd/install_skills が失敗しました" ;;
+  esac
+}
+
 summary() {
   step "まとめ"
   if [ "${#SKIPPED[@]}" -gt 0 ]; then
@@ -183,4 +242,6 @@ step "GitHub (gh)"
 setup_gh
 step "git"
 setup_git_user
+step "skills"
+setup_skills
 summary

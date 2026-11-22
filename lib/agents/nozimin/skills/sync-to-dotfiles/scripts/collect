@@ -1,7 +1,7 @@
 #!/bin/bash
 # この Mac の設定と dotfiles リポジトリの差分を集め、決まった形式で標準出力に出す。
 # /sync-to-dotfiles の skill が読む。読み取り専用で、書き込むのは git fetch だけ。
-# 使い方: collect [--no-fetch]
+# 使い方: collect [--expect-repo <絶対パス>] [--no-fetch]
 # サブモード（どれも読み取り専用。結果は標準出力だけに出し、ファイルは書き換えない。<出力ファイル> は collect の出力を保存したもの）:
 #   collect --body <出力ファイル> <kind> <lines>                段落の body（先頭の 4 スペースを外したもの）を出す
 #   collect --in-worktree <出力ファイル> <kind> <lines>         その段落が作業ツリーの lib/zshrc にあるか（yes / no）
@@ -17,9 +17,10 @@ export LC_ALL=C
 # git status と git diff が .git/index を書き換えないようにする
 export GIT_OPTIONAL_LOCKS=0
 
-# リポジトリは collect の場所（.claude/skills/sync-to-dotfiles/scripts/ の 4 つ上）から求める。
-# REPO_ROOT、LIB_DIR、dotfiles ブロックの名前（MARKER）は、この cmd/common.sh のものを使う
-COMMON_SH="$(dirname "${BASH_SOURCE[0]}")/../../../../cmd/common.sh"
+# Codex は skill をキャッシュにコピーするため、~/.config/dotfiles/repo から clone を見つける。
+# REPO_ROOT、LIB_DIR、dotfiles ブロックの名前（MARKER）は、clone 内の cmd/common.sh のものを使う。
+DOTFILES_REPO_FILE="$HOME/.config/dotfiles/repo"
+DOTFILES_MIGRATION_FILE="$HOME/.config/dotfiles/repo.migrating"
 IGNORE_FILE="${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}"
 # lib の要約で出す最大の行数と、plist の値を省略する文字数
 MAX_LINES=200
@@ -118,6 +119,21 @@ function block_step(s,   n) {
 # 引用符の直後から始まるものは閉じる引用符の手前まで（空白を含む）、そうでないものは \ でエスケープした空白を含む
 # shellcheck disable=SC2016 # 正規表現の $HOME は文字どおり
 PATH_REF_RE='(^|[^[:alnum:]_./~$"'\''-])(~|\$HOME|\$\{HOME\}|/Users)/([^][:space:]"'\''`;:(){}|&<>*?$,[\]|\\ )*|["'\''](~|\$HOME|\$\{HOME\}|/Users)/[^]"'\''`;:(){}|&<>*?$,[]*'
+
+read_single_line_file() {
+  local file="$1" raw value
+  raw="$(cat "$file" 2>/dev/null && printf '\001')" || return 1
+  raw="${raw%$'\001'}"
+  case "$raw" in
+    *$'\n'*)
+      value="${raw%%$'\n'*}"
+      [ -z "${raw#*$'\n'}" ] || return 1
+      ;;
+    *) value="$raw" ;;
+  esac
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
 
 fatal() {
   printf 'collect: %s\n' "$1" >&2
@@ -612,7 +628,7 @@ print_repo() {
     behind="${counts%%[[:space:]]*}"
     ahead="${counts##*[[:space:]]}"
   fi
-  printf '=== repo\nbranch: %s\nbehind: %s\nahead: %s\n' "$branch" "$behind" "$ahead"
+  printf '=== repo\npath: %s\nbranch: %s\nbehind: %s\nahead: %s\n' "$REPO_ROOT" "$branch" "$behind" "$ahead"
   for path in "${DIRTY[@]}"; do
     printf 'dirty: %s\n' "$path"
   done
@@ -1132,7 +1148,7 @@ print_footer() {
 # --- サブモード（読み取り専用。結果は標準出力だけに出す） ---
 
 usage() {
-  fatal "使い方: collect [--no-fetch] | --body <出力ファイル> <kind> <lines> | --in-worktree <出力ファイル> <kind> <lines> | --check <出力ファイル> <kind> <ファイル> <lines>... | --between <ファイル> <from> <to|end> [skip...] | --without <ファイル> <lines>... | --diff <パス>..."
+  fatal "使い方: collect [--expect-repo <絶対パス>] [--no-fetch] | [--expect-repo <絶対パス>] --body <出力ファイル> <kind> <lines> | ..."
 }
 
 # valid_range <範囲>: 開始行-終了行（1 から数える）の形か
@@ -1247,6 +1263,13 @@ mode_diff() {
   done
 }
 
+EXPECTED_REPO=""
+if [ "${1:-}" = --expect-repo ]; then
+  [ "$#" -ge 2 ] || usage
+  EXPECTED_REPO="$2"
+  shift 2
+fi
+
 MODE=collect
 case "${1:-}" in
   --body | --in-worktree | --check | --between | --without | --diff)
@@ -1264,14 +1287,35 @@ case "${1:-}" in
 esac
 
 command -v git >/dev/null 2>&1 || fatal "git が見つかりません"
-if [ -f "$COMMON_SH" ]; then
-  # cmd/common.sh は、shellcheck に -x を付けたときだけ読ませる（付けなければ SC1091 を出さずに飛ばす）
-  # shellcheck source-path=SCRIPTDIR/../../../.. source=cmd/common.sh disable=SC1091
-  source "$COMMON_SH"
+if [ -e "$DOTFILES_MIGRATION_FILE" ] || [ -L "$DOTFILES_MIGRATION_FILE" ]; then
+  fatal "dotfiles skills の移行が未完了です。移行先 clone で cmd/install_skills を再実行してください"
 fi
+if [ ! -f "$DOTFILES_REPO_FILE" ] || [ -L "$DOTFILES_REPO_FILE" ]; then
+  fatal "dotfiles リポジトリの場所がありません。cmd/install_skills を実行してください"
+fi
+DOTFILES_REPO="$(read_single_line_file "$DOTFILES_REPO_FILE")" || fatal "~/.config/dotfiles/repo を読み取れません。cmd/install_skills を実行してください。読み取り権限や内容が問題なら確認して手動で修復してください"
+case "$DOTFILES_REPO" in
+  /*) ;;
+  *) fatal "~/.config/dotfiles/repo は絶対パスである必要があります。cmd/install_skills を実行してください" ;;
+esac
+DOTFILES_REPO_CANONICAL="$(cd "$DOTFILES_REPO" 2>/dev/null && pwd -P)" ||
+  fatal "dotfiles repo pointer の clone が見つかりません。cmd/install_skills を実行してください"
+[ "$DOTFILES_REPO_CANONICAL" = "$DOTFILES_REPO" ] ||
+  fatal "~/.config/dotfiles/repo は canonical absolute path である必要があります。cmd/install_skills を実行してください"
+if [ ! -f "$DOTFILES_REPO/cmd/common.sh" ] ||
+  [ ! -f "$DOTFILES_REPO/cmd/install_skills" ] || [ ! -d "$DOTFILES_REPO/lib" ]; then
+  fatal "~/.config/dotfiles/repo が dotfiles のクローンを指していません。cmd/install_skills を実行してください"
+fi
+COMMON_SH="$DOTFILES_REPO/cmd/common.sh"
+# shellcheck source=/dev/null
+source "$COMMON_SH"
 if [ -z "${REPO_ROOT:-}" ] || [ ! -d "$LIB_DIR" ] ||
   [ "$(repo_git rev-parse --show-toplevel 2>/dev/null)" != "$REPO_ROOT" ]; then
-  fatal "dotfiles リポジトリが見つかりません（collect は .claude/skills/sync-to-dotfiles/scripts/ に置きます）"
+  fatal "~/.config/dotfiles/repo が dotfiles のクローンを指していません。cmd/install_skills を実行してください"
+fi
+if [ -n "$EXPECTED_REPO" ]; then
+  EXPECTED_REPO="$(cd "$EXPECTED_REPO" 2>/dev/null && pwd -P)" || fatal "指定された確認済み repo が見つかりません"
+  [ "$EXPECTED_REPO" = "$REPO_ROOT" ] || fatal "確認済み repo ($EXPECTED_REPO) と現在の repo ($REPO_ROOT) が異なります。collect と承認からやり直してください"
 fi
 command -v zsh >/dev/null 2>&1 && ZSH_AVAILABLE=1
 ROOT_DIRS=$'\n'

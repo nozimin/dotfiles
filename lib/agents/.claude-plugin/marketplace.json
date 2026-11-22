@@ -1,0 +1,12 @@
+{
+  "name": "dotfiles",
+  "owner": {
+    "name": "nozimin"
+  },
+  "plugins": [
+    {
+      "name": "nozimin",
+      "source": "./nozimin"
+    }
+  ]
+}
