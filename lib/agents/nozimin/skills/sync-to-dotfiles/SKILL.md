@@ -310,14 +310,34 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
    "$lock_script" "$repo_path" -- bash -s -- "<ファイル>" "<一時ファイル>" <<'SH'
    set -eu
    file="$1"; tmp="$2"
-   [ -f "$file" ] && [ -r "$file" ] || { echo "元ファイルを読めません: $file" >&2; exit 1; }
+   resolve_regular_target() {
+     local path="$1" dir link hops=0
+     case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+     while [ -L "$path" ]; do
+       [ "$hops" -lt 40 ] || return 1
+       dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || return 1
+       link="$(readlink "$path")" || return 1
+       case "$link" in /*) path="$link" ;; *) path="$dir/$link" ;; esac
+       hops=$((hops + 1))
+     done
+     dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || return 1
+     path="$dir/$(basename "$path")"
+     [ -f "$path" ] && [ -r "$path" ] || return 1
+     printf '%s\n' "$path"
+   }
+   [ -e "$file" ] || [ -L "$file" ] || { echo "元ファイルがありません: $file" >&2; exit 1; }
+   resolved="$(resolve_regular_target "$file")" || { echo "元ファイルのリンク先が読める通常ファイルではありません: $file" >&2; exit 1; }
    [ -f "$tmp" ] && [ -r "$tmp" ] || { echo "一時ファイルを読めません: $tmp" >&2; exit 1; }
    stamp="$(date +%Y%m%d%H%M%S)"
    backup="$(mktemp "$file.backup-$stamp.XXXXXX")" || exit 1
-   stage="$(mktemp "$file.tmp.XXXXXX")" || { rm -f "$backup"; exit 1; }
-   if ! cp -p "$file" "$backup"; then rm -f "$backup" "$stage"; echo "バックアップに失敗しました: $file" >&2; exit 1; fi
-   if ! cp -p "$file" "$stage" || ! cat "$tmp" > "$stage"; then rm -f "$stage"; echo "一時ファイルを反映できませんでした: $file" >&2; exit 1; fi
-   if ! mv -f "$stage" "$file"; then rm -f "$stage"; echo "置き換えに失敗しました。元ファイルを保持しました: $file" >&2; exit 1; fi
+   if ! cp -p "$resolved" "$backup"; then rm -f "$backup"; echo "バックアップに失敗しました: $file" >&2; exit 1; fi
+   stage="$(mktemp "$resolved.tmp.XXXXXX")" || { echo "置き換え用一時ファイルを作成できません: $resolved" >&2; exit 1; }
+   trap 'if [ -n "${stage:-}" ]; then rm -f "$stage"; fi' EXIT
+   if ! cp -p "$resolved" "$stage" || ! cat "$tmp" > "$stage"; then echo "一時ファイルを反映できませんでした: $file" >&2; exit 1; fi
+   current_resolved="$(resolve_regular_target "$file")" || { echo "元ファイルのリンク先が変わりました。置き換えません: $file" >&2; exit 1; }
+   [ "$current_resolved" = "$resolved" ] || { echo "元ファイルのリンク先が変わりました。置き換えません: $file" >&2; exit 1; }
+   if ! mv -f "$stage" "$resolved"; then echo "置き換えに失敗しました。元ファイルを保持しました: $file" >&2; exit 1; fi
+   stage=""
    echo "バックアップ: $backup"
    SH
    ```

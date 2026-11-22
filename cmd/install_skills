@@ -19,10 +19,12 @@ CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CONFIG_DIR="$HOME/.config/dotfiles"
 REPO_POINTER="$CONFIG_DIR/repo"
 MIGRATION_MARKER="$CONFIG_DIR/repo.migrating"
+CODEX_MARKETPLACE_POINTER="$CONFIG_DIR/codex-marketplace"
 INSTALL_LOCK_DIR="$CONFIG_DIR/install_skills.lock"
 REPO_POINTER_TMP=""
 MIGRATION_MARKER_TMP=""
 CODEX_MARKETPLACE_ERROR_TMP=""
+CODEX_MARKETPLACE_PATH_TMP=""
 LOCK_HELD=0
 CLAUDE_AVAILABLE=0
 CODEX_AVAILABLE=0
@@ -35,6 +37,7 @@ cleanup() {
   [ -z "$REPO_POINTER_TMP" ] || rm -f "$REPO_POINTER_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f "$MIGRATION_MARKER_TMP"
   [ -z "$CODEX_MARKETPLACE_ERROR_TMP" ] || rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
+  [ -z "$CODEX_MARKETPLACE_PATH_TMP" ] || rm -f "$CODEX_MARKETPLACE_PATH_TMP"
   skills_lock_release
 }
 trap cleanup EXIT
@@ -162,6 +165,16 @@ PY
 
 stale_pointer_marketplace_path() {
   local old_repo old_marketplace
+  # This records the last Codex source that successfully registered, even if a
+  # later attempt advanced the migration marker before Claude failed.
+  if [ -f "$CODEX_MARKETPLACE_POINTER" ] && [ ! -L "$CODEX_MARKETPLACE_POINTER" ]; then
+    old_marketplace="$(cat "$CODEX_MARKETPLACE_POINTER")"
+    if [ -n "$old_marketplace" ] && [ "$old_marketplace" != "$CLAUDE_MARKETPLACE" ] &&
+      ! codex_marketplace_manifest_is_valid "$old_marketplace"; then
+      printf '%s\n' "$old_marketplace"
+      return 0
+    fi
+  fi
   # A failed migration may have moved its target again. Check that recorded target
   # before the still-valid repo pointer, since Codex may now point there.
   if [ -f "$MIGRATION_MARKER" ] && [ ! -L "$MIGRATION_MARKER" ]; then
@@ -216,6 +229,9 @@ begin_pointer_migration() {
       error "$MIGRATION_MARKER を通常ファイルとして扱えません。plugin 設定は変更していません"
       return 1
     fi
+    # Persist the actual Codex source before advancing the marker. A failure in
+    # Claude's update must not erase the path Codex still uses.
+    record_codex_marketplace_path || return 1
     if [ "$(cat "$MIGRATION_MARKER")" = "$REPO_ROOT" ]; then
       warn "未完了の移行を検出しました。skills は移行完了まで停止中です"
       return 0
@@ -233,6 +249,7 @@ begin_pointer_migration() {
     ok "移行中 marker を現在の clone に更新しました"
     return 0
   fi
+  record_codex_marketplace_path || return 1
   MIGRATION_MARKER_TMP="$(mktemp "$CONFIG_DIR/.repo.migrating.XXXXXX")" || {
     error "移行中 marker を作成できませんでした"
     return 1
@@ -312,6 +329,30 @@ sys.exit(0)
 PY
 }
 
+record_codex_marketplace_path() {
+  [ -n "$CODEX_MARKETPLACE_PATH" ] || return 0
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -e "$CODEX_MARKETPLACE_POINTER" ] || [ -L "$CODEX_MARKETPLACE_POINTER" ]; then
+    if [ ! -f "$CODEX_MARKETPLACE_POINTER" ] || [ -L "$CODEX_MARKETPLACE_POINTER" ]; then
+      error "$CODEX_MARKETPLACE_POINTER は通常ファイルではありません"
+      return 1
+    fi
+  fi
+  CODEX_MARKETPLACE_PATH_TMP="$(mktemp "$CONFIG_DIR/.codex-marketplace.XXXXXX")" || {
+    error "Codex marketplace path を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$CODEX_MARKETPLACE_PATH" >"$CODEX_MARKETPLACE_PATH_TMP" || return 1
+  mv "$CODEX_MARKETPLACE_PATH_TMP" "$CODEX_MARKETPLACE_POINTER" || {
+    error "Codex marketplace path を記録できませんでした"
+    return 1
+  }
+  CODEX_MARKETPLACE_PATH_TMP=""
+}
+
 install_codex_skills() {
   local cache_dir
   if [ "$CODEX_AVAILABLE" -eq 0 ]; then
@@ -337,11 +378,13 @@ install_codex_skills() {
       error "Codex に dotfiles marketplace を登録できませんでした"
       return 1
     }
+    CODEX_MARKETPLACE_PATH="$CLAUDE_MARKETPLACE"
     ok "Codex に dotfiles marketplace を登録しました"
   else
     ok "Codex の dotfiles marketplace は登録済み"
   fi
 
+  record_codex_marketplace_path || return 1
   cache_dir="$CODEX_HOME/plugins/cache/dotfiles/nozimin/local"
   if [ "$CODEX_STATE" = enabled ] &&
     diff -qr "$REPO_ROOT/lib/agents/nozimin" "$cache_dir" >/dev/null 2>&1 &&
