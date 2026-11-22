@@ -45,7 +45,7 @@ INITIAL_REPO_POINTER_PRESENT=0
 INITIAL_MIGRATION_MARKER_PRESENT=0
 
 validate_managed_config_roots() {
-  local pointer registered_path active_path cli available recovery marker_path
+  local pointer registered_path active_path cli available profile_bound
   PROFILE_STATE="$(python3 - "$CLAUDE_CONFIG_HOME" "$CODEX_HOME" <<'PY'
 import json, os, sys
 print(json.dumps({"claude": os.path.realpath(sys.argv[1]),
@@ -55,6 +55,7 @@ PY
     error "Claude Code / Codex の設定 profile を確認できませんでした"
     return 1
   }
+  profile_bound=0
   if [ -e "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
     if [ ! -f "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
       error "$PROFILE_POINTER は通常ファイルではありません。設定 profile を確認できません"
@@ -64,17 +65,7 @@ PY
       error "Agent Skills は別の Claude/Codex profile ($PROFILE_POINTER) に結び付いています。元の CLAUDE_CONFIG_DIR / CODEX_HOME に戻してください。profile ごとの repo pointer は未対応です"
       return 1
     fi
-  fi
-  recovery=0
-  if [ -f "$PROFILE_POINTER" ] && [ ! -L "$PROFILE_POINTER" ] &&
-    [ "$(cat "$PROFILE_POINTER")" = "$PROFILE_STATE" ] &&
-    [ -f "$MIGRATION_MARKER" ] && [ ! -L "$MIGRATION_MARKER" ] &&
-    { [ ! -e "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] ||
-      { [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ]; }; }; then
-    marker_path="$(cat "$MIGRATION_MARKER")"
-    case "$marker_path" in
-      /*) recovery=1 ;;
-    esac
+    profile_bound=1
   fi
   # Before profile binding existed, per-CLI sidecars may be the only evidence
   # that a different profile owns an existing registration. Never claim that
@@ -97,8 +88,8 @@ PY
     registered_path="$(cat "$pointer")"
     [ -n "$registered_path" ] && [ "$registered_path" != unused ] || continue
     if [ -z "$active_path" ]; then
-      if [ "$recovery" -eq 1 ]; then
-        warn "$cli の登録が移行途中で見つかりません。承認済み migration marker に従って現在の clone へ再登録します"
+      if [ "$profile_bound" -eq 1 ]; then
+        warn "$cli の登録が保存済み profile に見つからないため、この profile に再登録します"
         continue
       fi
       error "$pointer は $registered_path への登録を記録していますが、この $cli profile では登録を確認できません。登録元の CLAUDE_CONFIG_DIR / CODEX_HOME で移行してください"
