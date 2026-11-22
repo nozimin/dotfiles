@@ -1,0 +1,82 @@
+[
+ {
+  "source": "brew-cask",
+  "layer": "inventory",
+  "status": "ok",
+  "count": 2,
+  "fetched_at": "2026-11-10T12:00:00+09:00",
+  "evidence": {
+   "review": 0
+  },
+  "notes": [],
+  "items": [
+   {
+    "kind": "brew-cask",
+    "name": "example-comma",
+    "version": "4.98.0,240000",
+    "origin": "homebrew/cask",
+    "bundle_id": null,
+    "path": null,
+    "review": null
+   },
+   {
+    "kind": "brew-cask",
+    "name": "example-comma-new",
+    "version": "4.98.0,240000",
+    "origin": "homebrew/cask",
+    "bundle_id": null,
+    "path": null,
+    "review": null
+   }
+  ]
+ },
+ {
+  "source": "app",
+  "layer": "inventory",
+  "status": "ok",
+  "count": 4,
+  "fetched_at": "2026-11-10T12:00:00+09:00",
+  "evidence": {
+   "review": 0
+  },
+  "notes": [],
+  "items": [
+   {
+    "kind": "app",
+    "name": "zoom.us",
+    "version": "6.2.11 (43613)",
+    "origin": "other",
+    "bundle_id": "com.example.zoom.us",
+    "path": "/Applications/zoom.us.app",
+    "review": null
+   },
+   {
+    "kind": "app",
+    "name": "Example Build Newer",
+    "version": "6.2.11 (43613)",
+    "origin": "other",
+    "bundle_id": "com.example.examplebuildnewer",
+    "path": "/Applications/Example Build Newer.app",
+    "review": null
+   },
+   {
+    "kind": "app",
+    "name": "Example Minor Newer",
+    "version": "6.2.11 (43613)",
+    "origin": "other",
+    "bundle_id": "com.example.exampleminornewer",
+    "path": "/Applications/Example Minor Newer.app",
+    "review": null
+   },
+   {
+    "kind": "app",
+    "name": "Example Four Parts",
+    "version": "6.2.11",
+    "origin": "other",
+    "bundle_id": "com.example.examplefourparts",
+    "path": "/Applications/Example Four Parts.app",
+    "review": null
+   }
+  ]
+ }
+]

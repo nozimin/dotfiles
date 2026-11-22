@@ -73,11 +73,12 @@ usage() {
   jvn [--inventory FILE]      JVN iPedia と JVN の RSS から照合候補を出す
   jpcert                      JPCERT/CC の RSS にある注意喚起を出す
   compare A B                 バージョンを比べて lt / eq / gt を出す
+  latest-report               最新のレポートの .json のパスを出す（無ければ失敗）
   all [--save]                inventory とその他すべてを実行する
 
-出力はエンベロープの JSON 配列（compare を除く）。
+出力はエンベロープの JSON 配列（compare と latest-report を除く）。
 --inventory を省略すると、その場で inventory を実行する。
-all --save は、新しく作った一時ディレクトリのファイルに出力を書き、そのパスだけを出す。
+all --save は、新しく作った一時ディレクトリのファイルに出力を書き、そのパスだけを出す（前回までの保存先は消す）。
 EOF
 }
 
@@ -807,8 +808,14 @@ latest_result() {
   local source="$1" status="$2" count="$3" evidence="$4" items mode installed latest result outdated="" text
   shift 4
   items="$(cat)"
+  # 表示用の版が「6.2.11 (43613)」で、最新版（cask など）が「6.2.11.43613」のようにビルド番号を続ける形なら、
+  # インストール済みも「6.2.11.43613」にそろえて比べる（そのまま比べると、同じ版が lt になる）。ビルド番号の違いも比べられる
+  local build_re='^([^[:space:](]+)[[:space:]]*\(([0-9]+)\)$'
   # 区切りは空白でない文字（\x1f）にする。タブだと空の欄が詰められる
   while IFS=$'\x1f' read -r mode installed latest; do
+    if [[ "$installed" =~ $build_re ]] && [[ "$latest" == "${BASH_REMATCH[1]}."* ]]; then
+      installed="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+    fi
     if [ "$mode" = preset ]; then
       result='"preset"'
     elif [ -z "$installed" ] || [ -z "$latest" ]; then
@@ -956,7 +963,8 @@ latest_cask() {
     | [$targets[0][] | . as $t
       | if $t.kind == "brew-cask" then
           $by_token[$t.name] as $c
-          | {item: {kind, name, installed: .version, latest: $c.version, method: (if $c.version then "cask-api" else "unmapped" end),
+          | {item: {kind, name, installed: (.version | if . then split(",")[0] else . end), latest: $c.version,
+                    method: (if $c.version then "cask-api" else "unmapped" end),
                     eol: null, update_command: "brew upgrade --cask \($t.name)", matched: $c.token}, note: null}
         else
           ($by_app["\($t.name).app"] // []) as $candidates
@@ -1392,6 +1400,18 @@ cmd_compare() {
   version_compare "$1" "$2"
 }
 
+# 最新のレポートの .json のパスを出す（名前が日時なので、名前順の最後が最新）。無ければメッセージを出して 1 を返す
+cmd_latest_report() {
+  local dir="${VULNCHECK_REPORTS_DIR:-$HOME/Documents/vuln-check/reports}" file newest=""
+  for file in "$dir"/*.json; do
+    if [ -f "$file" ]; then
+      newest="$file"
+    fi
+  done
+  [ -n "$newest" ] || die "前回のレポートがありません（$dir に .json がありません）"
+  echo "$newest"
+}
+
 main() {
   local sub="${1:-}" output save="" dir
   if [ "$#" -gt 0 ]; then
@@ -1408,6 +1428,11 @@ main() {
       ;;
     compare)
       cmd_compare "$@"
+      return
+      ;;
+    latest-report)
+      [ "$#" -eq 0 ] || die "latest-report は引数を取りません: $*"
+      cmd_latest_report
       return
       ;;
     inventory | jpcert)
@@ -1437,7 +1462,9 @@ main() {
     return 0
   fi
   # --save: skill がシェルのリダイレクトを使わずに済むよう、終了時に消さない一時ディレクトリに書いてパスだけを出す（§3.4）
+  # 前回までの保存先が溜まらないよう、古い vulncheck-all.* を消してから作る
   dir="${TMPDIR:-/tmp}"
+  rm -rf "${dir%/}"/vulncheck-all.*
   dir="$(mktemp -d "${dir%/}/vulncheck-all.XXXXXX")"
   jq -s . "$output" >"$dir/all.json"
   echo "$dir/all.json"

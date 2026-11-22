@@ -71,9 +71,10 @@ endoflife.date、CISA KEV、JVN、JPCERT/CC、VS Code の削除済み一覧（Gi
 ```sh
 lib/agents/nozimin/skills/vuln-check/scripts/vulncheck inventory             # インベントリだけ
 lib/agents/nozimin/skills/vuln-check/scripts/vulncheck all                   # すべてのソース（数百 KB になる）
-lib/agents/nozimin/skills/vuln-check/scripts/vulncheck all --save            # 同じものを一時ファイルに保存し、パスだけを出す
+lib/agents/nozimin/skills/vuln-check/scripts/vulncheck all --save            # 同じものを一時ファイルに保存し、パスだけを出す（前回の保存先は消す）
 lib/agents/nozimin/skills/vuln-check/scripts/vulncheck compare 1.9.5 1.10.0  # lt を出す
-lib/agents/nozimin/skills/vuln-check/tests/run                               # 試験
+lib/agents/nozimin/skills/vuln-check/scripts/vulncheck latest-report         # 最新のレポートの .json のパスを出す
+lib/agents/nozimin/skills/vuln-check/tests/run                               # 試験（VULNCHECK_TEST_NETWORK=1 を付けると api.osv.dev への実問い合わせも行う）
 ```
 
 `all --save` で保存したファイルから、ソース異常だけを見る例:

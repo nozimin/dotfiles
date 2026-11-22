@@ -1,7 +1,7 @@
 #!/bin/bash
 # vuln-check の scripts/vulncheck の試験。仕様は docs/specs/vuln-check.md の §12。
 # 全項目の結果を表示し、1 つでも失敗すれば終了コード 1。
-# 外部ソースは fixtures/ のファイル（file://）と偽のコマンドに差し替える。ネットワークを使うのは 3 だけ。
+# 外部ソースは fixtures/ のファイル（file://）と偽のコマンドに差し替える。ネットワークを使うのは 3 だけ（VULNCHECK_TEST_NETWORK=1 のときだけ実行）。
 # vulncheck は、PATH を偽のコマンドと OS 付属のものだけにした環境で実行する（この Mac の brew や npm などを呼ばない）。
 # shellcheck disable=SC2016 # 単一引用符の中の $ は jq の変数
 
@@ -349,11 +349,15 @@ expect "vscode: フィクスチャ → ok（大文字小文字を区別せずに
     removal_date: "2026-11-03", type: "Malware"}]'
 inject vscode VULNCHECK_VSCODE_REMOVED_URL "file://$EMPTY/file" vscode --inventory "$INVENTORY"
 
-step "3. 既知の陽性（ネットワークが必要: api.osv.dev に問い合わせる）"
-vulncheck VULNCHECK_OSV_URL=https://api.osv.dev osv --inventory "$INVENTORY"
-expect "[ネットワーク] osv: npm lodash@4.17.15 → 脆弱性を返す（GHSA-35jh-r3h4-6jhm / CVE-2021-23337 を含む）" \
-  'envelope("osv") | .status == "ok"
-    and any(.items[]; .name == "lodash" and .id == "GHSA-35jh-r3h4-6jhm" and (.aliases | index("CVE-2021-23337")))'
+step "3. 既知の陽性（ネットワークが必要: api.osv.dev に問い合わせる。VULNCHECK_TEST_NETWORK=1 のときだけ実行）"
+if [ "${VULNCHECK_TEST_NETWORK:-}" = 1 ]; then
+  vulncheck VULNCHECK_OSV_URL=https://api.osv.dev osv --inventory "$INVENTORY"
+  expect "[ネットワーク] osv: npm lodash@4.17.15 → 脆弱性を返す（GHSA-35jh-r3h4-6jhm / CVE-2021-23337 を含む）" \
+    'envelope("osv") | .status == "ok"
+      and any(.items[]; .name == "lodash" and .id == "GHSA-35jh-r3h4-6jhm" and (.aliases | index("CVE-2021-23337")))'
+else
+  printf '%s-%s スキップ（VULNCHECK_TEST_NETWORK=1 で実行）\n' "$C_BLUE" "$C_RESET"
+fi
 
 step "4. compare（§7）"
 expect_compare 1.9.5 1.10.0 lt
@@ -385,6 +389,17 @@ expect_compare abc 1.0 '終了コード 2'
 expect_compare 9e08eb8f78fd 1.0 '終了コード 2'
 expect_compare 8.0.0 9e08eb8f78fd '終了コード 2'
 expect_compare 1.0 '' '終了コード 2'
+
+step "4b. 最新版との比較のそろえ方（フィクスチャ。ネットワークは使わない）"
+vulncheck latest --inventory "$FIXTURES/inventory-version.json"
+expect "cask-api: 表示用の版「6.2.11 (43613)」と cask の「6.2.11.43613」→ outdated: false（同じ版を lt にしない）" \
+  'envelope("cask-api") | item("zoom.us") | .outdated == false and .review == null and .installed == "6.2.11 (43613)"'
+expect "cask-api: 同じ版のビルド番号が新しい（6.2.11.44000）、マイナー版が新しい（6.3.0.50000）、括弧なしの 4 要素目が新しい → outdated: true" \
+  'envelope("cask-api") | item("Example Build Newer").outdated == true and item("Example Minor Newer").outdated == true
+    and item("Example Four Parts").outdated == true'
+expect "cask-api: .app なしの cask の「4.98.0,240000」→ installed は「,」から後ろを切り落とし、比べられる（同じ版は false、新しい版は true）" \
+  'envelope("cask-api") | (item("example-comma") | .installed == "4.98.0" and .outdated == false and .review == null)
+    and (item("example-comma-new") | .installed == "4.98.0" and .latest == "4.99.0" and .outdated == true)'
 
 step "5. 層1の鮮度（フィクスチャ。ネットワークは使わない）"
 # KEV はカタログの dateReleased（dateAdded の最大の 2026-11-04 より新しい）
@@ -506,6 +521,34 @@ expect "jvn-ipedia と jvn: RSS の項目の数を読めない（偽の xmllint�
 vulncheck "$(with_fake xmllint)" jpcert
 expect "jpcert: RSS の項目の数を読めない（偽の xmllint）→ error（処理に失敗しました）" \
   'envelope("jpcert") | .status == "error" and any(.notes[]; test("処理に失敗しました"))'
+
+step "8. latest-report と all --save（フィクスチャ。ネットワークは使わない）"
+mkdir -p "$TMP/reports-empty" "$TMP/reports"
+touch "$TMP/reports/20261101090000.md" "$TMP/reports/20261101090000.json" "$TMP/reports/20261109153000.json" "$TMP/reports/20261109153000.md"
+vulncheck VULNCHECK_REPORTS_DIR="$TMP/reports" latest-report
+if [ "$RC" -eq 0 ] && [ "$(cat "$OUT")" = "$TMP/reports/20261109153000.json" ]; then
+  pass "latest-report: 名前順で最後の .json のパスを出す"
+else
+  fail "latest-report: 名前順で最後の .json のパスを出す" "終了コード $RC" "$(cat "$OUT")"
+fi
+for dir in "$TMP/reports-empty" "$TMP/reports-missing"; do
+  vulncheck VULNCHECK_REPORTS_DIR="$dir" latest-report
+  if [ "$RC" -eq 1 ] && [ ! -s "$OUT" ] && grep -q "前回のレポートがありません" "$ERR"; then
+    pass "latest-report: .json が無い（${dir##*/}）→ 終了コード 1 とメッセージ"
+  else
+    fail "latest-report: .json が無い（${dir##*/}）→ 終了コード 1 とメッセージ" "終了コード $RC" "$(cat "$ERR")"
+  fi
+done
+# all --save を 2 回実行しても、保存先が溜まらない（前回の vulncheck-all.* を消す）
+vulncheck all --save
+first="$(cat "$OUT")"
+vulncheck all --save
+second="$(cat "$OUT")"
+if [ "$RC" -eq 0 ] && [ -s "$second" ] && [ ! -e "$first" ] && [ "$(find "$TMP" -maxdepth 1 -name 'vulncheck-all.*' | wc -l | tr -d ' ')" = 1 ]; then
+  pass "all --save: 2 回実行しても vulncheck-all.* は 1 つだけ（前回の保存先を消す）"
+else
+  fail "all --save: 2 回実行しても vulncheck-all.* は 1 つだけ（前回の保存先を消す）" "終了コード $RC" "$first" "$second"
+fi
 
 step "まとめ"
 if [ "${#FAILED[@]}" -gt 0 ]; then

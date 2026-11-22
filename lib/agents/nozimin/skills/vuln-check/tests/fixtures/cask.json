@@ -3,5 +3,11 @@
   {"token": "firefox", "version": "145.0", "deprecated": false, "disabled": false,
    "artifacts": [{"app": ["Firefox.app"]}, {"zap": [{"trash": ["~/Library/Caches/Firefox"]}]}]},
   {"token": "firefox@beta", "version": "146.0b3", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Firefox.app"]}]},
-  {"token": "example-latest", "version": "latest", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Example Latest.app"]}]}
+  {"token": "example-latest", "version": "latest", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Example Latest.app"]}]},
+  {"token": "zoom", "version": "6.2.11.43613", "deprecated": false, "disabled": false, "artifacts": [{"app": ["zoom.us.app"]}]},
+  {"token": "example-build-newer", "version": "6.2.11.44000", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Example Build Newer.app"]}]},
+  {"token": "example-minor-newer", "version": "6.3.0.50000", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Example Minor Newer.app"]}]},
+  {"token": "example-four-parts", "version": "6.2.11.1", "deprecated": false, "disabled": false, "artifacts": [{"app": ["Example Four Parts.app"]}]},
+  {"token": "example-comma", "version": "4.98.0,240000", "deprecated": false, "disabled": false, "artifacts": [{"binary": ["example-comma"]}]},
+  {"token": "example-comma-new", "version": "4.99.0,250000", "deprecated": false, "disabled": false, "artifacts": [{"binary": ["example-comma-new"]}]}
 ]
