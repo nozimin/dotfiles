@@ -1,7 +1,7 @@
 #!/bin/bash
 # この Mac の設定と dotfiles リポジトリの差分を集め、決まった形式で標準出力に出す。
 # /sync-to-dotfiles の skill が読む。読み取り専用で、書き込むのは git fetch だけ。
-# 使い方: collect [--no-fetch]
+# 使い方: collect [--expect-repo <絶対パス>] [--no-fetch]
 # サブモード（どれも読み取り専用。結果は標準出力だけに出し、ファイルは書き換えない。<出力ファイル> は collect の出力を保存したもの）:
 #   collect --body <出力ファイル> <kind> <lines>                段落の body（先頭の 4 スペースを外したもの）を出す
 #   collect --in-worktree <出力ファイル> <kind> <lines>         その段落が作業ツリーの lib/zshrc にあるか（yes / no）
@@ -613,7 +613,7 @@ print_repo() {
     behind="${counts%%[[:space:]]*}"
     ahead="${counts##*[[:space:]]}"
   fi
-  printf '=== repo\nbranch: %s\nbehind: %s\nahead: %s\n' "$branch" "$behind" "$ahead"
+  printf '=== repo\npath: %s\nbranch: %s\nbehind: %s\nahead: %s\n' "$REPO_ROOT" "$branch" "$behind" "$ahead"
   for path in "${DIRTY[@]}"; do
     printf 'dirty: %s\n' "$path"
   done
@@ -1133,7 +1133,7 @@ print_footer() {
 # --- サブモード（読み取り専用。結果は標準出力だけに出す） ---
 
 usage() {
-  fatal "使い方: collect [--no-fetch] | --body <出力ファイル> <kind> <lines> | --in-worktree <出力ファイル> <kind> <lines> | --check <出力ファイル> <kind> <ファイル> <lines>... | --between <ファイル> <from> <to|end> [skip...] | --without <ファイル> <lines>... | --diff <パス>..."
+  fatal "使い方: collect [--expect-repo <絶対パス>] [--no-fetch] | [--expect-repo <絶対パス>] --body <出力ファイル> <kind> <lines> | ..."
 }
 
 # valid_range <範囲>: 開始行-終了行（1 から数える）の形か
@@ -1248,6 +1248,13 @@ mode_diff() {
   done
 }
 
+EXPECTED_REPO=""
+if [ "${1:-}" = --expect-repo ]; then
+  [ "$#" -ge 2 ] || usage
+  EXPECTED_REPO="$2"
+  shift 2
+fi
+
 MODE=collect
 case "${1:-}" in
   --body | --in-worktree | --check | --between | --without | --diff)
@@ -1268,7 +1275,7 @@ command -v git >/dev/null 2>&1 || fatal "git が見つかりません"
 if [ -e "$DOTFILES_MIGRATION_FILE" ] || [ -L "$DOTFILES_MIGRATION_FILE" ]; then
   fatal "dotfiles skills の移行が未完了です。移行先 clone で cmd/install_skills を再実行してください"
 fi
-if [ ! -f "$DOTFILES_REPO_FILE" ]; then
+if [ ! -f "$DOTFILES_REPO_FILE" ] || [ -L "$DOTFILES_REPO_FILE" ]; then
   fatal "dotfiles リポジトリの場所がありません。cmd/install_skills を実行してください"
 fi
 DOTFILES_REPO="$(cat "$DOTFILES_REPO_FILE")"
@@ -1282,6 +1289,10 @@ source "$COMMON_SH"
 if [ -z "${REPO_ROOT:-}" ] || [ ! -d "$LIB_DIR" ] ||
   [ "$(repo_git rev-parse --show-toplevel 2>/dev/null)" != "$REPO_ROOT" ]; then
   fatal "~/.config/dotfiles/repo が dotfiles のクローンを指していません。cmd/install_skills を実行してください"
+fi
+if [ -n "$EXPECTED_REPO" ]; then
+  EXPECTED_REPO="$(cd "$EXPECTED_REPO" 2>/dev/null && pwd -P)" || fatal "指定された確認済み repo が見つかりません"
+  [ "$EXPECTED_REPO" = "$REPO_ROOT" ] || fatal "確認済み repo ($EXPECTED_REPO) と現在の repo ($REPO_ROOT) が異なります。collect と承認からやり直してください"
 fi
 command -v zsh >/dev/null 2>&1 && ZSH_AVAILABLE=1
 ROOT_DIRS=$'\n'

@@ -9,7 +9,7 @@ dotfiles の skills は 1 つの Claude Code 形式 plugin `nozimin` にまと�
 - 両方ともユーザー全体にインストールするため、どのディレクトリからでも使える。
 - `cmd/install_skills` は何度実行してもよい。登録済みの手順は `ok` を出して飛ばす。marketplace が以前の clone の場所を指している場合は、現在の clone に登録し直すか確認する。
 - clone の場所を切り替える場合は、Claude Code と Codex の marketplace 変更を始める前に一度確認する。断ると両 CLI の設定と `~/.config/dotfiles/repo` はそのまま。切り替え中にエラーが起きたときは repo pointer を更新せず、`~/.config/dotfiles/repo.migrating` を残す。この marker がある間は `collect` が停止し、違う clone を誤操作しない。エラーを直した後に移行先 clone から `cmd/install_skills` を再実行して移行を完了する。
-- `cmd/install_skills` は `mkdir` による lock を使い、preflight から pointer と marker の更新まで同時実行を防ぐ。通常終了では lock を自動で外す。プロセスが強制終了した場合は owner PID が残るので、終了済みと確認してからエラーに表示された `rm -rf ~/.config/dotfiles/install_skills.lock` を実行し、再試行する。owner 情報がない・壊れている、または別 host の lock の場合は自動削除しない。
+- `cmd/install_skills` と `scripts/with-repo-lock` は `cmd/skills_lock.sh` の `mkdir` lock を共有し、preflight から pointer/marker の更新、または承認された書き込みまでを同時実行から守る。`with-repo-lock` は最初に記録した repo path と pointer を照合し、移行中 marker があれば書き込みを行わない。通常終了では lock を自動で外す。プロセスが強制終了した場合は owner PID が残るので、終了済みと確認してからエラーに表示された `rm -rf ~/.config/dotfiles/install_skills.lock` を実行し、再試行する。owner 情報がない・壊れている、または別 host の lock の場合は自動削除しない。
 - `cmd/setup` は plugin が有効でない場合に確認し、許可されたときだけ `cmd/install_skills` を実行する。
 
 インストール時に clone の絶対パスを `~/.config/dotfiles/repo` に保存する。skill と同梱スクリプトはこの場所から dotfiles を見つけるため、Codex のキャッシュから起動しても動作する。

@@ -68,7 +68,8 @@ Codex CLI:  `$nozimin:sync-to-dotfiles`（`/skills` の一覧から選択）
 cmd/
   setup          セットアップ本体
   install_brew   Homebrew のインストール（単体でも実行できる）
-  install_skills Claude Code と Codex への skills インストール
+  install_skills    Claude Code と Codex への skills インストール
+  skills_lock.sh   skills installer と Agent Skill の共有 lock
   common.sh      共通関数（setup、install_brew、install_skills から source する）
   skills_common.sh Claude Code / Codex の plugin 状態確認（setup と install_skills から source する）
 lib/
@@ -80,6 +81,7 @@ lib/
   agents/                      Claude Code / Codex 共通 plugin と skills
     .claude-plugin/            dotfiles marketplace
     nozimin/                   plugin と skills
+      skills/sync-to-dotfiles/scripts/with-repo-lock  承認済み clone を検証して書き込みを直列化
 cmd/install_skills              plugin の登録とインストール
 ```
 

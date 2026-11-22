@@ -6,6 +6,8 @@
 source "$(dirname "$0")/common.sh"
 # shellcheck source=cmd/skills_common.sh disable=SC1091
 source "$(dirname "$0")/skills_common.sh"
+# shellcheck source=cmd/skills_lock.sh disable=SC1091
+source "$(dirname "$0")/skills_lock.sh"
 
 if [ "$#" -ne 0 ]; then
   error "引数は指定できません"
@@ -33,65 +35,11 @@ cleanup() {
   [ -z "$REPO_POINTER_TMP" ] || rm -f "$REPO_POINTER_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f "$MIGRATION_MARKER_TMP"
   [ -z "$CODEX_MARKETPLACE_ERROR_TMP" ] || rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
-  if [ "$LOCK_HELD" -eq 1 ] && [ "$(sed -n '1p' "$INSTALL_LOCK_DIR/owner" 2>/dev/null)" = "$$" ]; then
-    rm -rf "$INSTALL_LOCK_DIR"
-  fi
+  skills_lock_release
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-acquire_installer_lock() {
-  local lock_host owner_pid owner_host attempts
-  mkdir -p "$CONFIG_DIR" || {
-    error "$CONFIG_DIR を作成できませんでした"
-    return 1
-  }
-  lock_host="$(hostname)" || {
-    error "lock 用の host 名を取得できませんでした"
-    return 1
-  }
-  while ! mkdir "$INSTALL_LOCK_DIR" 2>/dev/null; do
-    if [ ! -d "$INSTALL_LOCK_DIR" ] || [ -L "$INSTALL_LOCK_DIR" ]; then
-      error "$INSTALL_LOCK_DIR は lock directory ではありません。内容を確認し、別の installer が動作していないことを確認してから手動で整理してください"
-      return 1
-    fi
-    if [ ! -f "$INSTALL_LOCK_DIR/owner" ]; then
-      attempts=0
-      while [ "$attempts" -lt 10 ] && [ ! -f "$INSTALL_LOCK_DIR/owner" ]; do
-        sleep 0.1
-        attempts=$((attempts + 1))
-      done
-      if [ ! -f "$INSTALL_LOCK_DIR/owner" ]; then
-        error "$INSTALL_LOCK_DIR に owner 情報がありません。別 installer の起動中なら少し待って再実行し、起動中でない場合は lock directory を手動で削除してから再試行してください"
-        return 1
-      fi
-    fi
-    owner_pid="$(sed -n '1p' "$INSTALL_LOCK_DIR/owner")"
-    owner_host="$(sed -n '2p' "$INSTALL_LOCK_DIR/owner")"
-    case "$owner_pid" in
-      ''|0|*[!0-9]*)
-        error "$INSTALL_LOCK_DIR/owner が不正です。installer が実行中でないことを確認し、lock directory を手動で削除してから再実行してください"
-        return 1
-        ;;
-    esac
-    if [ "$owner_host" != "$lock_host" ]; then
-      error "$INSTALL_LOCK_DIR は別 host ($owner_host) の lock です。共有 HOME の場合は所有 host で installer が終了したことを確認してください。lock を自動では削除しません"
-      return 1
-    fi
-    if kill -0 "$owner_pid" 2>/dev/null; then
-      error "別の skills installer が実行中です (pid $owner_pid, host $owner_host)"
-      return 1
-    fi
-    error "skills installer の stale lock を検出しました (pid $owner_pid, host $owner_host)。その installer が終了したことを確認し、次を実行してから再試行してください: rm -rf '$INSTALL_LOCK_DIR'"
-    return 1
-  done
-  if ! printf '%s\n%s\n' "$$" "$lock_host" >"$INSTALL_LOCK_DIR/owner"; then
-    error "$INSTALL_LOCK_DIR に owner 情報を書き込めませんでした。lock を確認してください"
-    return 1
-  fi
-  LOCK_HELD=1
-}
 
 json_marketplace_path() {
   local json="$1" host="$2" path
@@ -120,6 +68,31 @@ except Exception:
   printf '%s\n' "$path"
 }
 
+json_codex_marketplace_path() {
+  local json="$1" path
+  path="$(printf '%s\n' "$json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if not isinstance(data, dict):
+        raise ValueError("expected plugin list object")
+    for group in ("installed", "available"):
+        records = data.get(group, [])
+        if not isinstance(records, list):
+            raise ValueError("expected plugin list")
+        for plugin in records:
+            if plugin.get("marketplaceName") == "dotfiles":
+                source = plugin.get("marketplaceSource", {})
+                if source.get("sourceType") == "local" and isinstance(source.get("source"), str):
+                    print(source["source"])
+                    sys.exit(0)
+    print("")
+except Exception:
+    sys.exit(1)
+')" || return 1
+  printf '%s\n' "$path"
+}
+
 preflight_claude() {
   local marketplaces
   command -v claude >/dev/null 2>&1 || return 0
@@ -136,7 +109,7 @@ preflight_claude() {
 }
 
 preflight_codex() {
-  local marketplaces configured_path list_error
+  local plugins list_error configured_path
   command -v codex >/dev/null 2>&1 || return 0
   CODEX_AVAILABLE=1
   # codex CLI requires CODEX_HOME to exist, but creating it is deferred until after confirmation.
@@ -147,18 +120,12 @@ preflight_codex() {
     error "Codex の marketplace 確認用一時ファイルを作成できませんでした"
     return 1
   }
-  if ! marketplaces="$(codex plugin marketplace list --json 2>"$CODEX_MARKETPLACE_ERROR_TMP")"; then
+  if ! plugins="$(codex plugin list --marketplace dotfiles --available --json 2>"$CODEX_MARKETPLACE_ERROR_TMP")"; then
     list_error="$(cat "$CODEX_MARKETPLACE_ERROR_TMP")"
-    # A local marketplace whose clone was moved cannot be listed because its
-    # manifest is gone. Recover its path from config.toml only in that case.
-    configured_path="$(codex_configured_marketplace_path)" || {
-      error "Codex の marketplace を確認できず、config.toml から登録先も読めませんでした: $list_error"
+    configured_path="$(stale_pointer_marketplace_path)" || {
+      error "Codex の dotfiles plugin を確認できませんでした: $list_error"
       return 1
     }
-    if [ -z "$configured_path" ] || [ -e "$configured_path" ]; then
-      error "Codex の marketplace を確認できませんでした: $list_error"
-      return 1
-    fi
     CODEX_MARKETPLACE_PATH="$configured_path"
     CODEX_STATE="missing"
     rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
@@ -167,35 +134,34 @@ preflight_codex() {
   fi
   rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
   CODEX_MARKETPLACE_ERROR_TMP=""
-  CODEX_MARKETPLACE_PATH="$(json_marketplace_path "$marketplaces" codex)" || {
-    error "Codex の marketplace JSON を解析できませんでした"
+  CODEX_MARKETPLACE_PATH="$(json_codex_marketplace_path "$plugins")" || {
+    error "Codex の dotfiles plugin JSON を解析できませんでした"
     return 1
   }
-  CODEX_STATE="$(codex_plugin_state)" || return 1
+  CODEX_STATE="$(codex_plugin_state_from_json "$plugins")" || return 1
 }
 
-codex_configured_marketplace_path() {
-  python3 - "$CODEX_HOME/config.toml" <<'PY'
-import json, re, sys
+stale_pointer_marketplace_path() {
+  local old_repo old_marketplace
+  [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] || return 1
+  old_repo="$(cat "$REPO_POINTER")"
+  [ -n "$old_repo" ] && [ "$old_repo" != "$REPO_ROOT" ] || return 1
+  old_marketplace="$old_repo/lib/agents"
+  if OLD_MARKETPLACE="$old_marketplace" python3 - <<'PY'
+import json, os
 try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        lines = f.readlines()
-    in_marketplace = False
-    values = {}
-    for line in lines:
-        section = re.fullmatch(r"\s*\[([^]]+)\]\s*", line)
-        if section:
-            in_marketplace = section.group(1) == "marketplaces.dotfiles"
-            continue
-        if in_marketplace:
-            item = re.fullmatch(r'\s*(source_type|source)\s*=\s*("(?:\\.|[^"\\])*")\s*(?:#.*)?\n?', line)
-            if item:
-                values[item.group(1)] = json.loads(item.group(2))
-    if values.get("source_type") == "local" and isinstance(values.get("source"), str):
-        print(values["source"])
+    with open(os.path.join(os.environ["OLD_MARKETPLACE"], ".claude-plugin", "marketplace.json"), encoding="utf-8") as f:
+        manifest = json.load(f)
+    valid = (manifest.get("name") == "dotfiles" and
+             any(p.get("name") == "nozimin" for p in manifest.get("plugins", [])))
 except Exception:
-    sys.exit(1)
+    valid = False
+raise SystemExit(0 if valid else 1)
 PY
+  then
+    return 1
+  fi
+  printf '%s\n' "$old_marketplace"
 }
 
 validate_repo_pointer_destination() {
@@ -338,7 +304,7 @@ install_codex_skills() {
   ok "Codex の nozimin plugin をインストールまたは更新しました"
 }
 
-acquire_installer_lock || exit 1
+skills_lock_acquire || exit 1
 preflight_claude || exit 1
 preflight_codex || exit 1
 

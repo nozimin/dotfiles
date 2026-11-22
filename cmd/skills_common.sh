@@ -31,10 +31,15 @@ except Exception:
 
 codex_plugin_state() {
   local json state
-  if ! json="$(codex plugin list --marketplace dotfiles --json)"; then
+  if ! json="$(codex plugin list --marketplace dotfiles --available --json)"; then
     error "Codex の plugin 状態を確認できませんでした"
     return 1
   fi
+  codex_plugin_state_from_json "$json"
+}
+
+codex_plugin_state_from_json() {
+  local json="$1" state
   if ! state="$(printf '%s\n' "$json" | python3 -c '
 import json, sys
 try:
@@ -75,7 +80,7 @@ skills_setup_step() {
   fi
   if [ "$have_cli" -eq 0 ]; then
     warn "Claude Code と Codex が見つからないため、skills をスキップしました"
-    return 0
+    return 2
   fi
   if [ "$needs_install" -eq 0 ]; then
     ok "利用可能な Agent の skills はインストール済み"
