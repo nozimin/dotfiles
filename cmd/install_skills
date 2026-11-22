@@ -1,0 +1,697 @@
+#!/bin/bash
+# Claude Code と Codex に dotfiles の Agent Skills をインストールする。
+# shellcheck disable=SC2088 # メッセージ中の ~ は表示用
+
+# shellcheck source=cmd/common.sh disable=SC1091
+source "$(dirname "$0")/common.sh"
+# shellcheck source=cmd/skills_common.sh disable=SC1091
+source "$(dirname "$0")/skills_common.sh"
+# shellcheck source=cmd/skills_lock.sh disable=SC1091
+source "$(dirname "$0")/skills_lock.sh"
+
+if [ "$#" -ne 0 ]; then
+  error "引数は指定できません"
+  exit 2
+fi
+
+# With neither supported CLI present there is no installation to perform.
+# Skip before creating the shared config directory or lock so a custom profile
+# cannot become bound just because the tool was invoked from that environment.
+if ! command -v claude >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; then
+  if { [ -e "$HOME/.config/dotfiles/repo" ] || [ -L "$HOME/.config/dotfiles/repo" ]; } ||
+    { [ -e "$HOME/.config/dotfiles/repo.migrating" ] || [ -L "$HOME/.config/dotfiles/repo.migrating" ]; } ||
+    { [ -e "$HOME/.config/dotfiles/claude-marketplace" ] || [ -L "$HOME/.config/dotfiles/claude-marketplace" ]; } ||
+    { [ -e "$HOME/.config/dotfiles/codex-marketplace" ] || [ -L "$HOME/.config/dotfiles/codex-marketplace" ]; } ||
+    { [ -e "$HOME/.config/dotfiles/skills-profile" ] || [ -L "$HOME/.config/dotfiles/skills-profile" ]; }; then
+    warn "Claude Code と Codex が見つからないため、既存の skills 状態と移行 marker を変更せずスキップしました。CLI を PATH に戻してから必要に応じて cmd/install_skills を再実行してください"
+  else
+    warn "Claude Code と Codex が見つからないため、skills をスキップしました"
+  fi
+  exit 2
+fi
+
+CLAUDE_MARKETPLACE="$REPO_ROOT/lib/agents"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+CLAUDE_CONFIG_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CONFIG_DIR="$HOME/.config/dotfiles"
+REPO_POINTER="$CONFIG_DIR/repo"
+MIGRATION_MARKER="$CONFIG_DIR/repo.migrating"
+CODEX_MARKETPLACE_POINTER="$CONFIG_DIR/codex-marketplace"
+CLAUDE_MARKETPLACE_POINTER="$CONFIG_DIR/claude-marketplace"
+PROFILE_POINTER="$CONFIG_DIR/skills-profile"
+# shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
+INSTALL_LOCK_DIR="$CONFIG_DIR/install_skills.lock"
+REPO_POINTER_TMP=""
+MIGRATION_MARKER_TMP=""
+CODEX_MARKETPLACE_ERROR_TMP=""
+CODEX_MARKETPLACE_PATH_TMP=""
+CLAUDE_MARKETPLACE_PATH_TMP=""
+CLI_STATUS_TMP=""
+PROFILE_TMP=""
+PROFILE_STATE=""
+CLAUDE_AVAILABLE=0
+CODEX_AVAILABLE=0
+CLAUDE_MARKETPLACE_PATH=""
+CODEX_MARKETPLACE_PATH=""
+CLAUDE_STATE="missing"
+CODEX_STATE="missing"
+# shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
+LOCK_HELD=0
+INITIAL_REPO_POINTER_PRESENT=0
+INITIAL_MIGRATION_MARKER_PRESENT=0
+
+validate_managed_config_roots() {
+  local pointer registered_path active_path cli available profile_bound
+  PROFILE_STATE="$(python3 - "$CLAUDE_CONFIG_HOME" "$CODEX_HOME" <<'PY'
+import json, os, sys
+print(json.dumps({"claude": os.path.realpath(sys.argv[1]),
+                  "codex": os.path.realpath(sys.argv[2])}, separators=(",", ":")))
+PY
+)" || {
+    error "Claude Code / Codex の設定 profile を確認できませんでした"
+    return 1
+  }
+  profile_bound=0
+  if [ -e "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+    if [ ! -f "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+      error "$PROFILE_POINTER は通常ファイルではありません。設定 profile を確認できません"
+      return 1
+    fi
+    if [ "$(cat "$PROFILE_POINTER")" != "$PROFILE_STATE" ]; then
+      error "Agent Skills は別の Claude/Codex profile ($PROFILE_POINTER) に結び付いています。元の CLAUDE_CONFIG_DIR / CODEX_HOME に戻してください。profile ごとの repo pointer は未対応です"
+      return 1
+    fi
+    profile_bound=1
+  fi
+  # Before profile binding existed, per-CLI sidecars may be the only evidence
+  # that a different profile owns an existing registration. Never claim that
+  # legacy global state from a profile which reports no corresponding entry.
+  for cli in claude codex; do
+    case "$cli" in
+      claude)
+        pointer="$CLAUDE_MARKETPLACE_POINTER"
+        available="$CLAUDE_AVAILABLE"
+        active_path="$CLAUDE_MARKETPLACE_PATH"
+        ;;
+      codex)
+        pointer="$CODEX_MARKETPLACE_POINTER"
+        available="$CODEX_AVAILABLE"
+        active_path="$CODEX_MARKETPLACE_PATH"
+        ;;
+    esac
+    [ "$available" -eq 1 ] || continue
+    [ -f "$pointer" ] && [ ! -L "$pointer" ] || continue
+    registered_path="$(cat "$pointer")"
+    [ -n "$registered_path" ] && [ "$registered_path" != unused ] || continue
+    if [ -z "$active_path" ]; then
+      if [ "$profile_bound" -eq 1 ]; then
+        warn "$cli の登録が保存済み profile に見つからないため、この profile に再登録します"
+        continue
+      fi
+      error "$pointer は $registered_path への登録を記録していますが、この $cli profile では登録を確認できません。登録元の CLAUDE_CONFIG_DIR / CODEX_HOME で移行してください"
+      return 1
+    fi
+  done
+}
+
+record_managed_config_roots() {
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -e "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+    if [ ! -f "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+      error "$PROFILE_POINTER は通常ファイルではありません"
+      return 1
+    fi
+    if [ "$(cat "$PROFILE_POINTER")" = "$PROFILE_STATE" ]; then
+      return 0
+    fi
+    error "Agent Skills の設定 profile が実行環境と一致しません"
+    return 1
+  fi
+  PROFILE_TMP="$(mktemp "$CONFIG_DIR/.skills-profile.XXXXXX")" || {
+    error "設定 profile を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$PROFILE_STATE" >"$PROFILE_TMP" || return 1
+  mv "$PROFILE_TMP" "$PROFILE_POINTER" || {
+    error "設定 profile を記録できませんでした"
+    return 1
+  }
+  PROFILE_TMP=""
+}
+
+cleanup() {
+  [ -z "$REPO_POINTER_TMP" ] || rm -f "$REPO_POINTER_TMP"
+  [ -z "$MIGRATION_MARKER_TMP" ] || rm -f "$MIGRATION_MARKER_TMP"
+  [ -z "$CODEX_MARKETPLACE_ERROR_TMP" ] || rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
+  [ -z "$CODEX_MARKETPLACE_PATH_TMP" ] || rm -f "$CODEX_MARKETPLACE_PATH_TMP"
+  [ -z "$CLAUDE_MARKETPLACE_PATH_TMP" ] || rm -f "$CLAUDE_MARKETPLACE_PATH_TMP"
+  [ -z "$CLI_STATUS_TMP" ] || rm -f "$CLI_STATUS_TMP"
+  [ -z "$PROFILE_TMP" ] || rm -f "$PROFILE_TMP"
+  skills_lock_release
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+json_marketplace_path() {
+  local json="$1" host="$2" path
+  path="$(printf '%s\n' "$json" | python3 -c '
+import json, sys
+host = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+    if host == "claude":
+        if not isinstance(data, list):
+            raise ValueError("expected marketplace list")
+        records = data
+    else:
+        if not isinstance(data, dict) or not isinstance(data.get("marketplaces"), list):
+            raise ValueError("expected marketplace list")
+        records = data["marketplaces"]
+    for record in records:
+        if record.get("name") == "dotfiles":
+            value = record.get("path") or record.get("root") or record.get("installLocation")
+            if value:
+                print(value)
+            break
+except Exception:
+    sys.exit(1)
+' "$host")" || return 1
+  printf '%s\n' "$path"
+}
+
+json_codex_marketplace_path() {
+  local json="$1" path
+  path="$(printf '%s\n' "$json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if not isinstance(data, dict):
+        raise ValueError("expected plugin list object")
+    for group in ("installed", "available"):
+        records = data.get(group, [])
+        if not isinstance(records, list):
+            raise ValueError("expected plugin list")
+        for plugin in records:
+            if plugin.get("marketplaceName") == "dotfiles":
+                source = plugin.get("marketplaceSource", {})
+                if source.get("sourceType") == "local" and isinstance(source.get("source"), str):
+                    print(source["source"])
+                    sys.exit(0)
+    print("")
+except Exception:
+    sys.exit(1)
+')" || return 1
+  printf '%s\n' "$path"
+}
+
+preflight_claude() {
+  local marketplaces
+  command -v claude >/dev/null 2>&1 || return 0
+  CLAUDE_AVAILABLE=1
+  marketplaces="$(claude plugin marketplace list --json)" || {
+    error "Claude Code の marketplace を確認できませんでした"
+    return 1
+  }
+  CLAUDE_MARKETPLACE_PATH="$(json_marketplace_path "$marketplaces" claude)" || {
+    error "Claude Code の marketplace JSON を解析できませんでした"
+    return 1
+  }
+  CLAUDE_STATE="$(claude_plugin_state)" || return 1
+}
+
+preflight_codex() {
+  local plugins list_error configured_path
+  command -v codex >/dev/null 2>&1 || return 0
+  CODEX_AVAILABLE=1
+  # codex CLI requires CODEX_HOME to exist, but creating it is deferred until after confirmation.
+  if [ ! -d "$CODEX_HOME" ]; then
+    return 0
+  fi
+  CODEX_MARKETPLACE_ERROR_TMP="$(mktemp "${TMPDIR:-/tmp}/dotfiles-codex-marketplace.XXXXXX")" || {
+    error "Codex の marketplace 確認用一時ファイルを作成できませんでした"
+    return 1
+  }
+  if ! plugins="$(codex plugin list --marketplace dotfiles --available --json 2>"$CODEX_MARKETPLACE_ERROR_TMP")"; then
+    list_error="$(cat "$CODEX_MARKETPLACE_ERROR_TMP")"
+    configured_path="$(stale_pointer_marketplace_path)" || {
+      error "Codex の dotfiles plugin を確認できませんでした: $list_error"
+      return 1
+    }
+    CODEX_MARKETPLACE_PATH="$configured_path"
+    CODEX_STATE="missing"
+    rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
+    CODEX_MARKETPLACE_ERROR_TMP=""
+    return 0
+  fi
+  rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
+  CODEX_MARKETPLACE_ERROR_TMP=""
+  CODEX_MARKETPLACE_PATH="$(json_codex_marketplace_path "$plugins")" || {
+    error "Codex の dotfiles plugin JSON を解析できませんでした"
+    return 1
+  }
+  CODEX_STATE="$(codex_plugin_state_from_json "$plugins")" || return 1
+}
+
+codex_marketplace_manifest_is_valid() {
+  local marketplace="$1"
+  OLD_MARKETPLACE="$marketplace" python3 - <<'PY'
+import json, os
+try:
+    root = os.path.realpath(os.environ["OLD_MARKETPLACE"])
+    with open(os.path.join(root, ".claude-plugin", "marketplace.json"), encoding="utf-8") as f:
+        manifest = json.load(f)
+    plugin = next(p for p in manifest.get("plugins", []) if p.get("name") == "nozimin")
+    source = plugin.get("source")
+    source_path = os.path.realpath(os.path.join(root, source)) if isinstance(source, str) and source else ""
+    valid = (manifest.get("name") == "dotfiles" and source_path.startswith(root + os.sep)
+             and os.path.isdir(source_path))
+except Exception:
+    valid = False
+raise SystemExit(0 if valid else 1)
+PY
+}
+
+stale_pointer_marketplace_path() {
+  local old_repo old_marketplace
+  # This records the last Codex source that successfully registered, even if a
+  # later attempt advanced the migration marker before Claude failed.
+  if [ -f "$CODEX_MARKETPLACE_POINTER" ] && [ ! -L "$CODEX_MARKETPLACE_POINTER" ]; then
+    old_marketplace="$(cat "$CODEX_MARKETPLACE_POINTER")"
+    if [ -n "$old_marketplace" ] && [ "$old_marketplace" != "$CLAUDE_MARKETPLACE" ] &&
+      ! codex_marketplace_manifest_is_valid "$old_marketplace"; then
+      printf '%s\n' "$old_marketplace"
+      return 0
+    fi
+  fi
+  # A failed migration may have moved its target again. Check that recorded target
+  # before the still-valid repo pointer, since Codex may now point there.
+  if [ -f "$MIGRATION_MARKER" ] && [ ! -L "$MIGRATION_MARKER" ]; then
+    old_repo="$(cat "$MIGRATION_MARKER")"
+    if [ -n "$old_repo" ] && [ "$old_repo" != "$REPO_ROOT" ]; then
+      old_marketplace="$old_repo/lib/agents"
+      if ! codex_marketplace_manifest_is_valid "$old_marketplace"; then
+        printf '%s\n' "$old_marketplace"
+        return 0
+      fi
+    fi
+  fi
+  [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] || return 1
+  old_repo="$(skills_repo_pointer_value "$REPO_POINTER")" || return 1
+  [ -n "$old_repo" ] && [ "$old_repo" != "$REPO_ROOT" ] || return 1
+  old_marketplace="$old_repo/lib/agents"
+  codex_marketplace_manifest_is_valid "$old_marketplace" && return 1
+  printf '%s\n' "$old_marketplace"
+}
+
+validate_repo_pointer_destination() {
+  if [ -e "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
+    if [ ! -f "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
+      error "$REPO_POINTER は通常ファイルではありません。plugin 設定は変更していません"
+      return 1
+    fi
+  fi
+}
+
+prepare_repo_pointer() {
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  validate_repo_pointer_destination || return 1
+  if [ -f "$REPO_POINTER" ] && [ "$(skills_repo_pointer_value "$REPO_POINTER")" = "$REPO_ROOT" ]; then
+    return 0
+  fi
+  REPO_POINTER_TMP="$(mktemp "$CONFIG_DIR/.repo.XXXXXX")" || {
+    error "$REPO_POINTER を更新する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$REPO_ROOT" >"$REPO_POINTER_TMP" || {
+    error "$REPO_POINTER を更新する内容を書き込めませんでした"
+    return 1
+  }
+}
+
+begin_pointer_migration() {
+  if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
+    if [ ! -f "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
+      error "$MIGRATION_MARKER を通常ファイルとして扱えません。plugin 設定は変更していません"
+      return 1
+    fi
+    # Persist the actual Codex source before advancing the marker. A failure in
+    # Claude's update must not erase the path Codex still uses.
+    record_codex_marketplace_path || return 1
+    if [ "$(cat "$MIGRATION_MARKER")" = "$REPO_ROOT" ]; then
+      warn "未完了の移行を検出しました。skills は移行完了まで停止中です"
+      return 0
+    fi
+    MIGRATION_MARKER_TMP="$(mktemp "$CONFIG_DIR/.repo.migrating.XXXXXX")" || {
+      error "移行中 marker の移行先を更新する一時ファイルを作成できませんでした"
+      return 1
+    }
+    printf '%s\n' "$REPO_ROOT" >"$MIGRATION_MARKER_TMP" || return 1
+    mv "$MIGRATION_MARKER_TMP" "$MIGRATION_MARKER" || {
+      error "移行中 marker を新しい clone に更新できませんでした。plugin 設定は変更していません"
+      return 1
+    }
+    MIGRATION_MARKER_TMP=""
+    ok "移行中 marker を現在の clone に更新しました"
+    return 0
+  fi
+  record_codex_marketplace_path || return 1
+  MIGRATION_MARKER_TMP="$(mktemp "$CONFIG_DIR/.repo.migrating.XXXXXX")" || {
+    error "移行中 marker を作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$REPO_ROOT" >"$MIGRATION_MARKER_TMP" || return 1
+  mv "$MIGRATION_MARKER_TMP" "$MIGRATION_MARKER" || {
+    error "移行中 marker を有効にできませんでした"
+    return 1
+  }
+  MIGRATION_MARKER_TMP=""
+}
+
+install_claude_skills() {
+  if [ "$CLAUDE_AVAILABLE" -eq 0 ]; then
+    warn "Claude Code が見つからないため、skills をスキップしました"
+    return 0
+  fi
+
+  if [ -n "$CLAUDE_MARKETPLACE_PATH" ] && [ "$CLAUDE_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; then
+    if [ "$CLAUDE_STATE" != missing ]; then
+      claude plugin uninstall nozimin@dotfiles --scope user >/dev/null 2>&1 || true
+    fi
+    claude plugin marketplace remove dotfiles --json >/dev/null || {
+      error "Claude Code の古い dotfiles marketplace を削除できませんでした"
+      return 1
+    }
+    CLAUDE_MARKETPLACE_PATH=""
+    CLAUDE_STATE="missing"
+  fi
+
+  if [ -z "$CLAUDE_MARKETPLACE_PATH" ]; then
+    claude plugin marketplace add "$CLAUDE_MARKETPLACE" --scope user --json >/dev/null || {
+      error "Claude Code に dotfiles marketplace を登録できませんでした"
+      return 1
+    }
+    ok "Claude Code に dotfiles marketplace を登録しました"
+  else
+    ok "Claude Code の dotfiles marketplace は登録済み"
+  fi
+
+  CLAUDE_MARKETPLACE_PATH="$CLAUDE_MARKETPLACE"
+  record_claude_marketplace_path || return 1
+
+  case "$CLAUDE_STATE" in
+    enabled) ok "Claude Code の nozimin plugin はインストール済み" ;;
+    disabled)
+      claude plugin enable nozimin@dotfiles || {
+        error "Claude Code の nozimin plugin を有効にできませんでした"
+        return 1
+      }
+      ok "Claude Code の nozimin plugin を有効にしました"
+      ;;
+    missing)
+      claude plugin install nozimin@dotfiles --scope user --json >/dev/null || {
+        error "Claude Code に nozimin plugin をインストールできませんでした"
+        return 1
+      }
+      ok "Claude Code の nozimin plugin をインストールしました"
+      ;;
+  esac
+}
+
+record_claude_marketplace_path() {
+  [ -n "$CLAUDE_MARKETPLACE_PATH" ] || return 0
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -e "$CLAUDE_MARKETPLACE_POINTER" ] || [ -L "$CLAUDE_MARKETPLACE_POINTER" ]; then
+    if [ ! -f "$CLAUDE_MARKETPLACE_POINTER" ] || [ -L "$CLAUDE_MARKETPLACE_POINTER" ]; then
+      error "$CLAUDE_MARKETPLACE_POINTER は通常ファイルではありません"
+      return 1
+    fi
+    if [ "$(cat "$CLAUDE_MARKETPLACE_POINTER")" = "$CLAUDE_MARKETPLACE_PATH" ]; then
+      return 0
+    fi
+  fi
+  CLAUDE_MARKETPLACE_PATH_TMP="$(mktemp "$CONFIG_DIR/.claude-marketplace.XXXXXX")" || {
+    error "Claude marketplace path を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$CLAUDE_MARKETPLACE_PATH" >"$CLAUDE_MARKETPLACE_PATH_TMP" || return 1
+  mv "$CLAUDE_MARKETPLACE_PATH_TMP" "$CLAUDE_MARKETPLACE_POINTER" || {
+    error "Claude marketplace path を記録できませんでした"
+    return 1
+  }
+  CLAUDE_MARKETPLACE_PATH_TMP=""
+}
+
+record_cli_unused() {
+  local pointer="$1"
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+    if [ ! -f "$pointer" ] || [ -L "$pointer" ]; then
+      error "$pointer は通常ファイルではありません"
+      return 1
+    fi
+    return 0
+  fi
+  CLI_STATUS_TMP="$(mktemp "$CONFIG_DIR/.cli-status.XXXXXX")" || {
+    error "未使用 CLI の状態を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf 'unused\n' >"$CLI_STATUS_TMP" || return 1
+  mv "$CLI_STATUS_TMP" "$pointer" || {
+    error "$pointer に未使用 CLI の状態を記録できませんでした"
+    return 1
+  }
+  CLI_STATUS_TMP=""
+}
+
+check_missing_cli_migrations() {
+  local cli pointer path repo_path
+  repo_path=""
+  [ ! -f "$REPO_POINTER" ] || repo_path="$(skills_repo_pointer_value "$REPO_POINTER")" || return 1
+  for cli in claude codex; do
+    case "$cli" in
+      claude)
+        [ "$CLAUDE_AVAILABLE" -eq 0 ] || continue
+        pointer="$CLAUDE_MARKETPLACE_POINTER"
+        ;;
+      codex)
+        [ "$CODEX_AVAILABLE" -eq 0 ] || continue
+        pointer="$CODEX_MARKETPLACE_POINTER"
+        ;;
+    esac
+    if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+      if [ ! -f "$pointer" ] || [ -L "$pointer" ]; then
+        error "$pointer は通常ファイルではありません。CLI の移行状態を確認できません"
+        return 1
+      fi
+      IFS= read -r path <"$pointer" || path=""
+      [ "$path" != unused ] || continue
+      if [ -z "$path" ]; then
+        error "$pointer に登録先がありません。CLI を PATH に戻して移行してください"
+        return 1
+      fi
+      if [ "$path" != "$CLAUDE_MARKETPLACE" ]; then
+        error "$cli の dotfiles marketplace は $path に登録済みですが CLI が見つかりません。CLI を PATH に戻してから移行を再実行してください"
+        return 1
+      fi
+    elif { [ -n "$repo_path" ] && [ "$repo_path" != "$REPO_ROOT" ]; } ||
+      [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
+      # Older releases did not track Claude's registration separately. A stale
+      # repo pointer or pending migration is enough evidence that this CLI may
+      # still use the old clone, so require it before changing the shared pointer.
+      error "$cli の登録先を確認できません（repo pointer: ${repo_path:-不明}）。CLI を PATH に戻してから移行を再実行してください"
+      return 1
+    fi
+  done
+}
+
+codex_cache_executable_modes_match() {
+  python3 - "$1" "$2" <<'PY'
+import os, stat, sys
+source, cache = sys.argv[1:]
+for root, dirs, files in os.walk(source, followlinks=False):
+    rel_root = os.path.relpath(root, source)
+    for name in files:
+        src = os.path.join(root, name)
+        rel = os.path.normpath(os.path.join(rel_root, name))
+        dst = os.path.join(cache, rel)
+        if os.path.islink(src) or not os.path.isfile(dst) or os.path.islink(dst):
+            continue
+        src_exec = stat.S_IMODE(os.stat(src).st_mode) & 0o111
+        dst_exec = stat.S_IMODE(os.stat(dst).st_mode) & 0o111
+        if src_exec != dst_exec:
+            sys.exit(1)
+sys.exit(0)
+PY
+}
+
+record_codex_marketplace_path() {
+  [ -n "$CODEX_MARKETPLACE_PATH" ] || return 0
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -e "$CODEX_MARKETPLACE_POINTER" ] || [ -L "$CODEX_MARKETPLACE_POINTER" ]; then
+    if [ ! -f "$CODEX_MARKETPLACE_POINTER" ] || [ -L "$CODEX_MARKETPLACE_POINTER" ]; then
+      error "$CODEX_MARKETPLACE_POINTER は通常ファイルではありません"
+      return 1
+    fi
+    if [ "$(cat "$CODEX_MARKETPLACE_POINTER")" = "$CODEX_MARKETPLACE_PATH" ]; then
+      return 0
+    fi
+  fi
+  CODEX_MARKETPLACE_PATH_TMP="$(mktemp "$CONFIG_DIR/.codex-marketplace.XXXXXX")" || {
+    error "Codex marketplace path を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$CODEX_MARKETPLACE_PATH" >"$CODEX_MARKETPLACE_PATH_TMP" || return 1
+  mv "$CODEX_MARKETPLACE_PATH_TMP" "$CODEX_MARKETPLACE_POINTER" || {
+    error "Codex marketplace path を記録できませんでした"
+    return 1
+  }
+  CODEX_MARKETPLACE_PATH_TMP=""
+}
+
+install_codex_skills() {
+  local cache_dir
+  if [ "$CODEX_AVAILABLE" -eq 0 ]; then
+    warn "Codex が見つからないため、skills をスキップしました"
+    return 0
+  fi
+  mkdir -p "$CODEX_HOME" || {
+    error "Codex の設定ディレクトリを作成できませんでした: $CODEX_HOME"
+    return 1
+  }
+
+  if [ -n "$CODEX_MARKETPLACE_PATH" ] && [ "$CODEX_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; then
+    codex plugin marketplace remove dotfiles --json >/dev/null || {
+      error "Codex の古い dotfiles marketplace を削除できませんでした"
+      return 1
+    }
+    CODEX_MARKETPLACE_PATH=""
+    CODEX_STATE="missing"
+  fi
+
+  if [ -z "$CODEX_MARKETPLACE_PATH" ]; then
+    codex plugin marketplace add "$CLAUDE_MARKETPLACE" --json >/dev/null || {
+      error "Codex に dotfiles marketplace を登録できませんでした"
+      return 1
+    }
+    CODEX_MARKETPLACE_PATH="$CLAUDE_MARKETPLACE"
+    ok "Codex に dotfiles marketplace を登録しました"
+  else
+    ok "Codex の dotfiles marketplace は登録済み"
+  fi
+
+  record_codex_marketplace_path || return 1
+  cache_dir="$CODEX_HOME/plugins/cache/dotfiles/nozimin/local"
+  if [ "$CODEX_STATE" = enabled ] &&
+    diff -qr "$REPO_ROOT/lib/agents/nozimin" "$cache_dir" >/dev/null 2>&1 &&
+    codex_cache_executable_modes_match "$REPO_ROOT/lib/agents/nozimin" "$cache_dir"; then
+    ok "Codex の nozimin plugin は最新"
+    return 0
+  fi
+
+  # `plugin add` refreshes the local cache in place, including removed files.
+  codex plugin add nozimin@dotfiles --json >/dev/null || {
+    error "Codex に nozimin plugin をインストールまたは更新できませんでした"
+    return 1
+  }
+  ok "Codex の nozimin plugin をインストールまたは更新しました"
+}
+
+if [ "${DOTFILES_SETUP_LOCK_OWNER_PID:-}" = "$PPID" ] && skills_lock_is_owned_by "$PPID"; then
+  : # cmd/setup owns and releases the validated shared lock
+else
+  skills_lock_acquire || exit 1
+fi
+if [ -e "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
+  skills_repo_pointer_value "$REPO_POINTER" >/dev/null || {
+    error "$REPO_POINTER を読み取れないか、1 行の repo path ではありません。権限と内容を確認して手動で修復してから再実行してください"
+    exit 1
+  }
+fi
+preflight_claude || exit 1
+preflight_codex || exit 1
+check_missing_cli_migrations || exit 1
+validate_managed_config_roots || exit 1
+
+REPO_POINTER_VALUE=""
+[ ! -f "$REPO_POINTER" ] || REPO_POINTER_VALUE="$(skills_repo_pointer_value "$REPO_POINTER")" || exit 1
+MIGRATION_REQUIRED=0
+if [ -n "$REPO_POINTER_VALUE" ] && [ "$REPO_POINTER_VALUE" != "$REPO_ROOT" ]; then
+  MIGRATION_REQUIRED=1
+fi
+if { [ -n "$CLAUDE_MARKETPLACE_PATH" ] && [ "$CLAUDE_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; } ||
+  { [ -n "$CODEX_MARKETPLACE_PATH" ] && [ "$CODEX_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; }; then
+  MIGRATION_REQUIRED=1
+fi
+if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
+  MIGRATION_REQUIRED=1
+fi
+if [ "$MIGRATION_REQUIRED" -eq 1 ]; then
+  ask_yes_no "既存の dotfiles skills の参照先を $(pretty_path "$REPO_ROOT") に切り替えますか？" || {
+    warn "移行をスキップしました。marketplace と repo pointer は変更していません"
+    exit 2
+  }
+fi
+
+if [ -n "$REPO_POINTER_VALUE" ]; then
+  INITIAL_REPO_POINTER_PRESENT=1
+fi
+if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
+  INITIAL_MIGRATION_MARKER_PRESENT=1
+fi
+record_managed_config_roots || exit 1
+# Record an absent CLI before creating the first migration marker. If the first
+# installed CLI then fails, retry can distinguish this clean profile from an
+# older installation whose omitted CLI registration is unknown.
+if [ "$INITIAL_REPO_POINTER_PRESENT" -eq 0 ] &&
+  [ "$INITIAL_MIGRATION_MARKER_PRESENT" -eq 0 ]; then
+  if [ "$CLAUDE_AVAILABLE" -eq 0 ]; then
+    record_cli_unused "$CLAUDE_MARKETPLACE_POINTER" || exit 1
+  fi
+  if [ "$CODEX_AVAILABLE" -eq 0 ]; then
+    record_cli_unused "$CODEX_MARKETPLACE_POINTER" || exit 1
+  fi
+fi
+
+prepare_repo_pointer || exit 1
+if [ "$MIGRATION_REQUIRED" -eq 1 ] || [ -n "$REPO_POINTER_TMP" ]; then
+  begin_pointer_migration || exit 1
+fi
+
+step "Claude Code"
+install_claude_skills || exit 1
+step "Codex"
+install_codex_skills || exit 1
+
+if [ -n "$REPO_POINTER_TMP" ]; then
+  mv "$REPO_POINTER_TMP" "$REPO_POINTER" || {
+    error "$REPO_POINTER を更新できませんでした"
+    exit 1
+  }
+  REPO_POINTER_TMP=""
+  ok "dotfiles リポジトリの場所を更新しました"
+else
+  ok "dotfiles リポジトリの場所は登録済み"
+fi
+
+if [ -e "$MIGRATION_MARKER" ]; then
+  rm -f "$MIGRATION_MARKER" || {
+    error "repo pointer は更新しましたが、移行中 marker を削除できませんでした。cmd/install_skills を再実行してください"
+    exit 1
+  }
+fi
