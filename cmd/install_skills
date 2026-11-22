@@ -45,7 +45,7 @@ INITIAL_REPO_POINTER_PRESENT=0
 INITIAL_MIGRATION_MARKER_PRESENT=0
 
 validate_managed_config_roots() {
-  local pointer registered_path active_path cli available recovery
+  local pointer registered_path active_path cli available recovery marker_path
   PROFILE_STATE="$(python3 - "$CLAUDE_CONFIG_HOME" "$CODEX_HOME" <<'PY'
 import json, os, sys
 print(json.dumps({"claude": os.path.realpath(sys.argv[1]),
@@ -69,11 +69,12 @@ PY
   if [ -f "$PROFILE_POINTER" ] && [ ! -L "$PROFILE_POINTER" ] &&
     [ "$(cat "$PROFILE_POINTER")" = "$PROFILE_STATE" ] &&
     [ -f "$MIGRATION_MARKER" ] && [ ! -L "$MIGRATION_MARKER" ] &&
-    [ "$(cat "$MIGRATION_MARKER")" = "$REPO_ROOT" ] &&
-    [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] &&
-    [ -n "$(cat "$REPO_POINTER")" ] &&
-    [ "$(cat "$REPO_POINTER")" != "$REPO_ROOT" ]; then
-    recovery=1
+    { [ ! -e "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] ||
+      { [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ]; }; }; then
+    marker_path="$(cat "$MIGRATION_MARKER")"
+    case "$marker_path" in
+      /*) recovery=1 ;;
+    esac
   fi
   # Before profile binding existed, per-CLI sidecars may be the only evidence
   # that a different profile owns an existing registration. Never claim that
