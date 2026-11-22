@@ -23,7 +23,9 @@ fi
 # Tool-add handoff mode protects the delay between approval and a later Terminal.app launch.
 if [ -n "$EXPECTED_REPO" ]; then
   CONFIG_DIR="$HOME/.config/dotfiles"
+  # shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
   INSTALL_LOCK_DIR="$CONFIG_DIR/install_skills.lock"
+  # shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
   LOCK_HELD=0
   skills_lock_acquire || exit 1
   trap skills_lock_release EXIT

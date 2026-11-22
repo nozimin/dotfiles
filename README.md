@@ -30,7 +30,7 @@ git clone https://github.com/nozimin/dotfiles.git ~/WorkSpace/Repositories/dotfi
 | skills | Claude Code / Codex に `nozimin` plugin を確認してインストールする | [lib/skills.md](lib/skills.md) |
 
 `~/.zshrc` などへの追記や、既存ファイルの退避は、内容を表示して確認してから行う。最後にスキップしたものと失敗したものを表示する。失敗があれば終了コードは 1。
-skills は未インストールの場合だけ確認し、許可したときに専用の `cmd/install_skills` がインストールする。
+skills は plugin が未導入の場合、または collect が使える repo pointer がない場合に確認し、許可したときに専用の `cmd/install_skills` が登録と pointer を修復する。
 
 ## リポジトリを移動したとき
 

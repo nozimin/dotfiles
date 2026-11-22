@@ -72,6 +72,19 @@ skills_repo_migration_pending() {
   [ "$pointer_repo" != "$REPO_ROOT" ]
 }
 
+# Match collect's repository pointer checks before setup reports skills ready.
+skills_repo_pointer_is_usable() {
+  local pointer="${HOME}/.config/dotfiles/repo" pointer_value pointer_repo
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
+  pointer_value="$(cat "$pointer")" || return 1
+  [ -n "$pointer_value" ] || return 1
+  pointer_repo="$(cd "$pointer_value" 2>/dev/null && pwd -P)" || return 1
+  [ "$pointer_repo" = "$REPO_ROOT" ] || return 1
+  [ -f "$pointer_repo/cmd/common.sh" ] &&
+    [ -f "$pointer_repo/cmd/install_skills" ] &&
+    [ -d "$pointer_repo/lib" ]
+}
+
 # cmd/setup uses the same state parsing as cmd/install_skills.
 skills_setup_step() {
   local needs_install=0 have_cli=0 plugin_state codex_home="${CODEX_HOME:-$HOME/.codex}"
@@ -97,11 +110,14 @@ skills_setup_step() {
     warn "Claude Code と Codex が見つからないため、skills をスキップしました"
     return 2
   fi
+  if [ "$needs_install" -eq 0 ] && ! skills_repo_pointer_is_usable; then
+    needs_install=1
+  fi
   if [ "$needs_install" -eq 0 ]; then
     ok "利用可能な Agent の skills はインストール済み"
     return 0
   fi
-  ask_yes_no "Claude Code と Codex に dotfiles の skills をインストールしますか？" || {
+  ask_yes_no "Agent Skills の登録と dotfiles repo pointer を確認・修復しますか？" || {
     warn "skills をスキップしました"
     return 2
   }
