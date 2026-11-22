@@ -4,6 +4,8 @@
 
 # shellcheck source=cmd/common.sh disable=SC1091
 source "$(dirname "$0")/common.sh"
+# shellcheck source=cmd/skills_common.sh disable=SC1091
+source "$(dirname "$0")/skills_common.sh"
 
 if [ "$#" -ne 0 ]; then
   error "引数は指定できません"
@@ -12,69 +14,119 @@ fi
 
 CLAUDE_MARKETPLACE="$REPO_ROOT/lib/agents"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+CONFIG_DIR="$HOME/.config/dotfiles"
+REPO_POINTER="$CONFIG_DIR/repo"
+REPO_POINTER_TMP=""
+CLAUDE_AVAILABLE=0
+CODEX_AVAILABLE=0
+CLAUDE_MARKETPLACE_PATH=""
+CODEX_MARKETPLACE_PATH=""
+CLAUDE_STATE="missing"
+CODEX_STATE="missing"
+
+cleanup() {
+  [ -z "$REPO_POINTER_TMP" ] || rm -f "$REPO_POINTER_TMP"
+}
+trap cleanup EXIT
 
 json_marketplace_path() {
-  local json="$1" marketplace="$2" host="$3"
-  printf '%s\n' "$json" | python3 -c '
+  local json="$1" host="$2" path
+  path="$(printf '%s\n' "$json" | python3 -c '
 import json, sys
-marketplace, host = sys.argv[1:]
-data = json.load(sys.stdin)
-records = data if host == "claude" else data.get("marketplaces", [])
-for record in records:
-    if record.get("name") == marketplace:
-        path = record.get("path") if host == "claude" else record.get("root")
-        if not path and host == "claude":
-            path = record.get("installLocation")
-        if path:
-            print(path)
-        break
-' "$marketplace" "$host"
+host = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+    if host == "claude":
+        if not isinstance(data, list):
+            raise ValueError("expected marketplace list")
+        records = data
+    else:
+        if not isinstance(data, dict) or not isinstance(data.get("marketplaces"), list):
+            raise ValueError("expected marketplace list")
+        records = data["marketplaces"]
+    for record in records:
+        if record.get("name") == "dotfiles":
+            value = record.get("path") or record.get("root") or record.get("installLocation")
+            if value:
+                print(value)
+            break
+except Exception:
+    sys.exit(1)
+' "$host")" || return 1
+  printf '%s\n' "$path"
 }
 
-claude_plugin_state() {
-  local json="$1"
-  printf '%s\n' "$json" | python3 -c '
-import json, sys
-for plugin in json.load(sys.stdin):
-    if plugin.get("id") == "nozimin@dotfiles" and plugin.get("scope") == "user":
-        print("enabled" if plugin.get("enabled") else "disabled")
-        break
-'
-}
-
-codex_plugin_enabled() {
-  local json="$1"
-  printf '%s\n' "$json" | python3 -c '
-import json, sys
-for plugin in json.load(sys.stdin).get("installed", []):
-    if plugin.get("pluginId") == "nozimin@dotfiles":
-        print("yes" if plugin.get("enabled") else "no")
-        break
-'
-}
-
-install_claude_skills() {
-  local marketplaces marketplace_path plugins plugin_state
-  if ! command -v claude >/dev/null 2>&1; then
-    warn "Claude Code が見つからないため、skills をスキップしました"
-    return
-  fi
-
+preflight_claude() {
+  local marketplaces
+  command -v claude >/dev/null 2>&1 || return 0
+  CLAUDE_AVAILABLE=1
   marketplaces="$(claude plugin marketplace list --json)" || {
     error "Claude Code の marketplace を確認できませんでした"
     return 1
   }
-  marketplace_path="$(json_marketplace_path "$marketplaces" dotfiles claude)" || return 1
-  if [ -n "$marketplace_path" ] && [ "$marketplace_path" != "$CLAUDE_MARKETPLACE" ]; then
-    ask_yes_no "Claude Code の dotfiles marketplace は $(pretty_path "$marketplace_path") を参照しています。$(pretty_path "$CLAUDE_MARKETPLACE") に登録し直しますか？" || {
-      skip "Claude Code skills"
-      return
-    }
-    claude plugin uninstall nozimin@dotfiles --scope user >/dev/null 2>&1 || true
-    claude plugin marketplace remove dotfiles --json >/dev/null || return 1
-    marketplace_path=""
+  CLAUDE_MARKETPLACE_PATH="$(json_marketplace_path "$marketplaces" claude)" || {
+    error "Claude Code の marketplace JSON を解析できませんでした"
+    return 1
+  }
+  CLAUDE_STATE="$(claude_plugin_state)" || return 1
+}
+
+preflight_codex() {
+  local marketplaces
+  command -v codex >/dev/null 2>&1 || return 0
+  CODEX_AVAILABLE=1
+  # codex CLI requires CODEX_HOME to exist, but creating it is deferred until after confirmation.
+  if [ ! -d "$CODEX_HOME" ]; then
+    return 0
   fi
-  if [ -z "$marketplace_path" ]; then
+  marketplaces="$(codex plugin marketplace list --json)" || {
+    error "Codex の marketplace を確認できませんでした"
+    return 1
+  }
+  CODEX_MARKETPLACE_PATH="$(json_marketplace_path "$marketplaces" codex)" || {
+    error "Codex の marketplace JSON を解析できませんでした"
+    return 1
+  }
+  CODEX_STATE="$(codex_plugin_state)" || return 1
+}
+
+prepare_repo_pointer() {
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" = "$REPO_ROOT" ]; then
+    return 0
+  fi
+  REPO_POINTER_TMP="$(mktemp "$CONFIG_DIR/.repo.XXXXXX")" || {
+    error "$REPO_POINTER を更新する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$REPO_ROOT" >"$REPO_POINTER_TMP" || {
+    error "$REPO_POINTER を更新する内容を書き込めませんでした"
+    return 1
+  }
+}
+
+install_claude_skills() {
+  if [ "$CLAUDE_AVAILABLE" -eq 0 ]; then
+    warn "Claude Code が見つからないため、skills をスキップしました"
+    return 0
+  fi
+
+  if [ -n "$CLAUDE_MARKETPLACE_PATH" ] && [ "$CLAUDE_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; then
+    if [ "$CLAUDE_STATE" != missing ]; then
+      claude plugin uninstall nozimin@dotfiles --scope user >/dev/null 2>&1 || true
+    fi
+    claude plugin marketplace remove dotfiles --json >/dev/null || {
+      error "Claude Code の古い dotfiles marketplace を削除できませんでした"
+      return 1
+    }
+    CLAUDE_MARKETPLACE_PATH=""
+    CLAUDE_STATE="missing"
+  fi
+
+  if [ -z "$CLAUDE_MARKETPLACE_PATH" ]; then
     claude plugin marketplace add "$CLAUDE_MARKETPLACE" --scope user --json >/dev/null || {
       error "Claude Code に dotfiles marketplace を登録できませんでした"
       return 1
@@ -84,12 +136,7 @@ install_claude_skills() {
     ok "Claude Code の dotfiles marketplace は登録済み"
   fi
 
-  plugins="$(claude plugin list --json)" || {
-    error "Claude Code の plugin を確認できませんでした"
-    return 1
-  }
-  plugin_state="$(claude_plugin_state "$plugins")" || return 1
-  case "$plugin_state" in
+  case "$CLAUDE_STATE" in
     enabled) ok "Claude Code の nozimin plugin はインストール済み" ;;
     disabled)
       claude plugin enable nozimin@dotfiles || {
@@ -98,41 +145,37 @@ install_claude_skills() {
       }
       ok "Claude Code の nozimin plugin を有効にしました"
       ;;
-    *)
+    missing)
       claude plugin install nozimin@dotfiles --scope user --json >/dev/null || {
         error "Claude Code に nozimin plugin をインストールできませんでした"
         return 1
       }
+      ok "Claude Code の nozimin plugin をインストールしました"
       ;;
   esac
 }
 
 install_codex_skills() {
-  local marketplaces marketplace_path plugins enabled cache_dir
-  if ! command -v codex >/dev/null 2>&1; then
+  local cache_dir
+  if [ "$CODEX_AVAILABLE" -eq 0 ]; then
     warn "Codex が見つからないため、skills をスキップしました"
-    return
+    return 0
   fi
   mkdir -p "$CODEX_HOME" || {
     error "Codex の設定ディレクトリを作成できませんでした: $CODEX_HOME"
     return 1
   }
 
-  marketplaces="$(codex plugin marketplace list --json)" || {
-    error "Codex の marketplace を確認できませんでした"
-    return 1
-  }
-  marketplace_path="$(json_marketplace_path "$marketplaces" dotfiles codex)" || return 1
-  if [ -n "$marketplace_path" ] && [ "$marketplace_path" != "$CLAUDE_MARKETPLACE" ]; then
-    ask_yes_no "Codex の dotfiles marketplace は $(pretty_path "$marketplace_path") を参照しています。$(pretty_path "$CLAUDE_MARKETPLACE") に登録し直しますか？" || {
-      skip "Codex skills"
-      return
+  if [ -n "$CODEX_MARKETPLACE_PATH" ] && [ "$CODEX_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; then
+    codex plugin marketplace remove dotfiles --json >/dev/null || {
+      error "Codex の古い dotfiles marketplace を削除できませんでした"
+      return 1
     }
-    codex plugin remove nozimin@dotfiles >/dev/null 2>&1 || true
-    codex plugin marketplace remove dotfiles >/dev/null || return 1
-    marketplace_path=""
+    CODEX_MARKETPLACE_PATH=""
+    CODEX_STATE="missing"
   fi
-  if [ -z "$marketplace_path" ]; then
+
+  if [ -z "$CODEX_MARKETPLACE_PATH" ]; then
     codex plugin marketplace add "$CLAUDE_MARKETPLACE" --json >/dev/null || {
       error "Codex に dotfiles marketplace を登録できませんでした"
       return 1
@@ -142,41 +185,52 @@ install_codex_skills() {
     ok "Codex の dotfiles marketplace は登録済み"
   fi
 
-  plugins="$(codex plugin list --marketplace dotfiles --json)" || {
-    error "Codex の plugin を確認できませんでした"
-    return 1
-  }
-  enabled="$(codex_plugin_enabled "$plugins")" || return 1
   cache_dir="$CODEX_HOME/plugins/cache/dotfiles/nozimin/local"
-  if [ "$enabled" = "yes" ] && diff -qr "$REPO_ROOT/lib/agents/nozimin" "$cache_dir" >/dev/null 2>&1; then
+  if [ "$CODEX_STATE" = enabled ] && diff -qr "$REPO_ROOT/lib/agents/nozimin" "$cache_dir" >/dev/null 2>&1; then
     ok "Codex の nozimin plugin は最新"
-    return
+    return 0
   fi
-  if [ "$enabled" = "yes" ]; then
-    codex plugin remove nozimin@dotfiles >/dev/null || {
-      error "Codex の古い nozimin plugin を削除できませんでした"
-      return 1
-    }
-  fi
+
+  # `plugin add` refreshes the local cache in place, including removed files.
   codex plugin add nozimin@dotfiles --json >/dev/null || {
-    error "Codex に nozimin plugin をインストールできませんでした"
+    error "Codex に nozimin plugin をインストールまたは更新できませんでした"
     return 1
   }
-  ok "Codex の nozimin plugin をインストールしました"
+  ok "Codex の nozimin plugin をインストールまたは更新しました"
 }
 
-mkdir -p "$HOME/.config/dotfiles" || {
-  error "$HOME/.config/dotfiles を作成できませんでした"
-  exit 1
-}
-if [ ! -f "$HOME/.config/dotfiles/repo" ] || [ "$(cat "$HOME/.config/dotfiles/repo")" != "$REPO_ROOT" ]; then
-  echo "$REPO_ROOT" >"$HOME/.config/dotfiles/repo" || {
-    error "dotfiles リポジトリの場所を ~/.config/dotfiles/repo に保存できませんでした"
-    exit 1
+preflight_claude || exit 1
+preflight_codex || exit 1
+
+MIGRATION_REQUIRED=0
+if [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" != "$REPO_ROOT" ]; then
+  MIGRATION_REQUIRED=1
+fi
+if { [ -n "$CLAUDE_MARKETPLACE_PATH" ] && [ "$CLAUDE_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; } ||
+  { [ -n "$CODEX_MARKETPLACE_PATH" ] && [ "$CODEX_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; }; then
+  MIGRATION_REQUIRED=1
+fi
+if [ "$MIGRATION_REQUIRED" -eq 1 ]; then
+  ask_yes_no "既存の dotfiles skills の参照先を $(pretty_path "$REPO_ROOT") に切り替えますか？" || {
+    warn "移行をスキップしました。marketplace と repo pointer は変更していません"
+    exit 2
   }
 fi
+
+prepare_repo_pointer || exit 1
 
 step "Claude Code"
 install_claude_skills || exit 1
 step "Codex"
 install_codex_skills || exit 1
+
+if [ -n "$REPO_POINTER_TMP" ]; then
+  mv "$REPO_POINTER_TMP" "$REPO_POINTER" || {
+    error "$REPO_POINTER を更新できませんでした"
+    exit 1
+  }
+  REPO_POINTER_TMP=""
+  ok "dotfiles リポジトリの場所を更新しました"
+else
+  ok "dotfiles リポジトリの場所は登録済み"
+fi

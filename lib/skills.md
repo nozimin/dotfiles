@@ -8,9 +8,21 @@ dotfiles の skills は 1 つの Claude Code 形式 plugin `nozimin` にまと�
 - Codex CLI は marketplace を `~/.codex/plugins/cache/dotfiles/nozimin/local/` にコピーする。`lib/agents/nozimin/` に変更があれば、`cmd/install_skills` がコピーを入れ直す。
 - 両方ともユーザー全体にインストールするため、どのディレクトリからでも使える。
 - `cmd/install_skills` は何度実行してもよい。登録済みの手順は `ok` を出して飛ばす。marketplace が以前の clone の場所を指している場合は、現在の clone に登録し直すか確認する。
+- clone の場所を切り替える場合は、Claude Code と Codex の marketplace 変更を始める前に一度確認する。断ると両 CLI の設定と `~/.config/dotfiles/repo` はそのまま。切り替え中にエラーが起きたときも repo pointer は更新せず、既存の参照先が保たれる。エラーを直した後に再実行して移行を完了する。
 - `cmd/setup` は plugin が有効でない場合に確認し、許可されたときだけ `cmd/install_skills` を実行する。
 
 インストール時に clone の絶対パスを `~/.config/dotfiles/repo` に保存する。skill と同梱スクリプトはこの場所から dotfiles を見つけるため、Codex のキャッシュから起動しても動作する。
+
+## 既存環境からの移行
+
+以前の clone に未追跡の `.agents/skills/sync-to-dotfiles/` がある場合、Git の merge では削除されない。新しい plugin をインストールして動作を確認した後、旧ディレクトリにローカルの変更がないか調べる。
+
+```sh
+git status --short -- .agents/skills/sync-to-dotfiles
+diff -ru .agents/skills/sync-to-dotfiles lib/agents/nozimin/skills/sync-to-dotfiles
+```
+
+必要なローカル変更は先に保存する。古いコピーだと確認できたら、Codex が再発見しないよう `.agents/skills/` の外へ移動するか、不要なら削除する。`cmd/install_skills` は未追跡ファイルを自動では消さない。
 
 ## 呼び出し
 

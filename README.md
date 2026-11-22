@@ -70,6 +70,7 @@ cmd/
   install_brew   Homebrew のインストール（単体でも実行できる）
   install_skills Claude Code と Codex への skills インストール
   common.sh      共通関数（setup、install_brew、install_skills から source する）
+  skills_common.sh Claude Code / Codex の plugin 状態確認（setup と install_skills から source する）
 lib/
   Brewfile                     brew bundle でインストールするもの
   zshrc                        共通の zsh 設定（~/.zshrc から source する）
