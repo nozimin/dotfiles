@@ -20,6 +20,7 @@ export GIT_OPTIONAL_LOCKS=0
 # Codex は skill をキャッシュにコピーするため、~/.config/dotfiles/repo から clone を見つける。
 # REPO_ROOT、LIB_DIR、dotfiles ブロックの名前（MARKER）は、clone 内の cmd/common.sh のものを使う。
 DOTFILES_REPO_FILE="$HOME/.config/dotfiles/repo"
+DOTFILES_MIGRATION_FILE="$HOME/.config/dotfiles/repo.migrating"
 IGNORE_FILE="${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}"
 # lib の要約で出す最大の行数と、plist の値を省略する文字数
 MAX_LINES=200
@@ -1264,6 +1265,9 @@ case "${1:-}" in
 esac
 
 command -v git >/dev/null 2>&1 || fatal "git が見つかりません"
+if [ -e "$DOTFILES_MIGRATION_FILE" ] || [ -L "$DOTFILES_MIGRATION_FILE" ]; then
+  fatal "dotfiles skills の移行が未完了です。移行先 clone で cmd/install_skills を再実行してください"
+fi
 if [ ! -f "$DOTFILES_REPO_FILE" ]; then
   fatal "dotfiles リポジトリの場所がありません。cmd/install_skills を実行してください"
 fi

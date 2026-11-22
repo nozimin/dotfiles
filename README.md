@@ -34,7 +34,7 @@ skills は未インストールの場合だけ確認し、許可したときに�
 
 ## リポジトリを移動したとき
 
-`~/.zshrc` の source 行、`~/.config/starship.toml` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。
+`~/.zshrc` の source 行、`~/.config/starship.toml` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。Agent Skills は marketplace の再登録が別途必要なため、続けて移動先の `cmd/install_skills` も実行する。
 
 iTerm2 の手順は iTerm2 を終了しないと実行できないので、Terminal.app から実行する。
 
@@ -44,17 +44,17 @@ iTerm2 の手順は iTerm2 を終了しないと実行できないので、Termi
 
 ```
 Claude Code: /nozimin:sync-to-dotfiles
-Codex CLI:  $nozimin:sync-to-dotfiles
+Codex CLI:  `$nozimin:sync-to-dotfiles`（`/skills` の一覧から選択）
 ```
 
 - Brewfile、`~/.zshrc` / `~/.zprofile`、`lib/` の未コミットの変更について、dotfiles との差分が番号付きの表で出る。各項目のおすすめ（共通化／ローカル専用／保留）を見て、変えたい番号だけ答える。
 - 選んだものを `lib/` に反映し、`main` に commit する。push するかは最後に確認される。
-- ツールを新しく管理に加えたいときは、引数で伝える（例: `/sync-to-dotfiles VS Code も入れて`）。
+- ツールを新しく管理に加えたいときは、引数で伝える（例: `/nozimin:sync-to-dotfiles VS Code も入れて` または `$nozimin:sync-to-dotfiles VS Code も入れて`）。
 - ツールを追加した後は `cmd/setup` を実行し直す。ほかの Mac では `git pull` してから実行する。
 
 「ローカル専用」にした項目は除外リスト `~/.config/dotfiles/ignore` に追記され、次から表に出なくなる。Mac ごとのファイルで、リポジトリには入れない。
 
-- 1 行に 1 つ、項目の `id` をそのまま書く。`id` は `<種類>:<識別子>` の形で、`.claude/skills/sync-to-dotfiles/scripts/collect` を実行すると見られる。
+- 1 行に 1 つ、項目の `id` をそのまま書く。`id` は `<種類>:<識別子>` の形で、`lib/agents/nozimin/skills/sync-to-dotfiles/scripts/collect` を実行すると見られる。
   - Brewfile の項目: 名前（`brew:actionlint`。サードパーティの tap のものは `brew:<user>/<tap>/<名前>` の完全な名前）
   - `~/.zshrc` / `~/.zprofile` の段落: コメントでない行を、前後の空白を除いて ` ⏎ `（前後に空白）でつないだもの（`zshrc:alias gcomi=...`、`zprofile:if command -v rbenv >/dev/null 2>&1; then ⏎ eval "$(rbenv init - zsh)" ⏎ fi`）。段落の中身が変わると `id` も変わり、また表に出る。
   - 秘密情報を含む段落: 上の文字列の SHA-256（`zshrc:sha256:<SHA-256>` のような形。秘密情報をファイルに書き写さないため）
