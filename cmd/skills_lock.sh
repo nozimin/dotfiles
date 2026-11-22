@@ -2,6 +2,32 @@
 # caller は CONFIG_DIR、INSTALL_LOCK_DIR、LOCK_HELD を設定し、cmd/common.sh を source する。
 # shellcheck shell=bash
 
+# Read the shared repo pointer only when it contains a canonical absolute path
+# to a dotfiles clone. collect has the same self-contained validation because
+# it is copied into each agent's plugin cache.
+skills_repo_pointer_target() {
+  local pointer="$1" value resolved
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
+  IFS= read -r value <"$pointer" || [ -n "$value" ] || return 1
+  [ -n "$value" ] || return 1
+  case "$value" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  resolved="$(cd "$value" 2>/dev/null && pwd -P)" || return 1
+  [ "$resolved" = "$value" ] || return 1
+  [ -f "$resolved/cmd/common.sh" ] &&
+    [ -f "$resolved/cmd/install_skills" ] &&
+    [ -d "$resolved/lib" ] || return 1
+  printf '%s\n' "$resolved"
+}
+
+skills_repo_pointer_matches() {
+  local pointer_target
+  pointer_target="$(skills_repo_pointer_target "$1")" || return 1
+  [ "$pointer_target" = "$2" ]
+}
+
 skills_lock_acquire() {
   local lock_host owner_pid owner_host attempts
   mkdir -p "$CONFIG_DIR" || {

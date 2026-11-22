@@ -24,22 +24,20 @@ MIGRATION_MARKER="$CONFIG_DIR/repo.migrating"
 INSTALL_LOCK_DIR="$CONFIG_DIR/install_skills.lock"
 
 validate_repo_target() {
-  local pointer current_repo
+  local current_repo
   if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
     fatal "Agent Skills の移行が進行中です。移行先 clone の cmd/install_skills を再実行してから、collect と選択をやり直してください"
   fi
-  [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] || fatal "repo pointer が通常ファイルではありません。cmd/install_skills を実行してください"
-  pointer="$(cat "$REPO_POINTER")"
-  current_repo="$(cd "$pointer" 2>/dev/null && pwd -P)" || fatal "repo pointer の clone が見つかりません。cmd/install_skills を実行してください"
+  current_repo="$(skills_repo_pointer_target "$REPO_POINTER")" || fatal "repo pointer は dotfiles clone の canonical absolute path を含む通常ファイルである必要があります。symlink・相対パス・非 canonical path は使えません。cmd/install_skills を実行してください"
   [ "$current_repo" = "$EXPECTED_REPO" ] || fatal "確認時の repo ($EXPECTED_REPO) と現在の repo ($current_repo) が異なります。変更を行わず、collect と承認からやり直してください"
 }
 
-validate_repo_target
 [ -f "$EXPECTED_REPO/cmd/common.sh" ] && [ -f "$EXPECTED_REPO/cmd/skills_lock.sh" ] || fatal "確認済み repo の lock support が見つかりません"
 # shellcheck source=/dev/null
 source "$EXPECTED_REPO/cmd/common.sh"
 # shellcheck source=/dev/null
 source "$EXPECTED_REPO/cmd/skills_lock.sh"
+validate_repo_target
 # shellcheck disable=SC2034 # consumed by skills_lock.sh
 LOCK_HELD=0
 trap skills_lock_release EXIT

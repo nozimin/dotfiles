@@ -39,8 +39,7 @@ if [ -n "$EXPECTED_REPO" ]; then
     error "確認済み repo ($EXPECTED_REPO) と setup の repo ($REPO_ROOT) が異なります"
     exit 1
   }
-  [ -f "$CONFIG_DIR/repo" ] && [ ! -L "$CONFIG_DIR/repo" ] &&
-    [ "$(cd "$(cat "$CONFIG_DIR/repo")" 2>/dev/null && pwd -P)" = "$EXPECTED_REPO" ] || {
+  skills_repo_pointer_matches "$CONFIG_DIR/repo" "$EXPECTED_REPO" || {
     error "repo pointer が確認済み clone を指していません。設定を変更せず終了します"
     exit 1
   }

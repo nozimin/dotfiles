@@ -63,35 +63,15 @@ except Exception:
 
 # Detect a known clone migration before querying a CLI whose old manifest may no longer load.
 skills_repo_migration_pending() {
-  local pointer="${HOME}/.config/dotfiles/repo" pointer_repo pointer_value
+  local pointer="${HOME}/.config/dotfiles/repo" pointer_repo
   { [ -e "${HOME}/.config/dotfiles/repo.migrating" ] || [ -L "${HOME}/.config/dotfiles/repo.migrating" ]; } && return 0
-  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
-  pointer_value="$(cat "$pointer")"
-  [ -n "$pointer_value" ] || return 1
-  case "$pointer_value" in
-    /*) ;;
-    *) return 1 ;;
-  esac
-  pointer_repo="$(cd "$pointer_value" 2>/dev/null && pwd -P)" || pointer_repo="$pointer_value"
+  pointer_repo="$(skills_repo_pointer_target "$pointer")" || return 1
   [ "$pointer_repo" != "$REPO_ROOT" ]
 }
 
 # Match collect's repository pointer checks before setup reports skills ready.
 skills_repo_pointer_is_usable() {
-  local pointer="${HOME}/.config/dotfiles/repo" pointer_value pointer_repo
-  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
-  pointer_value="$(cat "$pointer")" || return 1
-  [ -n "$pointer_value" ] || return 1
-  case "$pointer_value" in
-    /*) ;;
-    *) return 1 ;;
-  esac
-  pointer_repo="$(cd "$pointer_value" 2>/dev/null && pwd -P)" || return 1
-  [ "$pointer_repo" = "$pointer_value" ] || return 1
-  [ "$pointer_repo" = "$REPO_ROOT" ] || return 1
-  [ -f "$pointer_repo/cmd/common.sh" ] &&
-    [ -f "$pointer_repo/cmd/install_skills" ] &&
-    [ -d "$pointer_repo/lib" ]
+  skills_repo_pointer_matches "${HOME}/.config/dotfiles/repo" "$REPO_ROOT"
 }
 
 # cmd/setup uses the same state parsing as cmd/install_skills.
