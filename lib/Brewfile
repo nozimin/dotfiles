@@ -9,6 +9,7 @@ cask "visual-studio-code"
 cask "claude-code"
 cask "clipy"
 cask "gitkraken"
+cask "codex"
 
 # フォント
 cask "font-fira-code-nerd-font"
