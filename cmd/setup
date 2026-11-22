@@ -155,6 +155,42 @@ setup_git_user() {
   fi
 }
 
+# Claude Code と Codex の両方で plugin が有効か確認する。
+setup_skills() {
+  local needs_install=0 have_cli=0
+  if command -v claude >/dev/null 2>&1; then
+    have_cli=1
+    if ! claude plugin list --json | python3 -c '
+import json, sys
+sys.exit(0 if any(p.get("id") == "nozimin@dotfiles" and p.get("scope") == "user" and p.get("enabled") for p in json.load(sys.stdin)) else 1)
+'; then
+      needs_install=1
+    fi
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    have_cli=1
+    if ! codex plugin list --marketplace dotfiles --json | python3 -c '
+import json, sys
+sys.exit(0 if any(p.get("pluginId") == "nozimin@dotfiles" and p.get("enabled") for p in json.load(sys.stdin).get("installed", [])) else 1)
+'; then
+      needs_install=1
+    fi
+  fi
+  if [ "$have_cli" -eq 0 ]; then
+    skip "skills（Claude Code と Codex がありません）"
+    return
+  fi
+  if [ "$needs_install" -eq 0 ]; then
+    ok "利用可能な Agent の skills はインストール済み"
+    return
+  fi
+  ask_yes_no "Claude Code と Codex に dotfiles の skills をインストールしますか？" || {
+    skip "skills"
+    return
+  }
+  "$REPO_ROOT/cmd/install_skills" || fail "skills" "cmd/install_skills が失敗しました"
+}
+
 summary() {
   step "まとめ"
   if [ "${#SKIPPED[@]}" -gt 0 ]; then
@@ -183,4 +219,6 @@ step "GitHub (gh)"
 setup_gh
 step "git"
 setup_git_user
+step "skills"
+setup_skills
 summary

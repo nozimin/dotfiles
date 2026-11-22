@@ -11,11 +11,12 @@ disable-model-invocation: true
 
 - 扱うのは `collect` が出す差分だけ。新しいツールを管理に加えるのは、起動時の引数か会話でユーザーが頼んだときだけ（「ツールの追加」）。
 - commit は `main` に直接行う。個人用の dotfiles なので、ブランチも PR も作らない（ユーザーが決めたこと）。
-- コマンドはリポジトリのルートで実行する。
+- dotfiles のファイル操作や Git 操作は `~/.config/dotfiles/repo` のパスで行う。
+- この skill に同梱したスクリプトは `scripts/` にある。利用可能な skill の一覧に表示される `SKILL.md` の場所を基準に、相対パスで実行する。
 
 ## collect の出力
 
-`.claude/skills/sync-to-dotfiles/scripts/collect` は差分を標準出力に出す。読み取り専用で、書き込むのは `git fetch` だけ。`--no-fetch` を付けると fetch しない（fetch は 30 秒で打ち切る。ssh の origin では `BatchMode` と `ConnectTimeout` を付けるが、`GIT_SSH_COMMAND` `GIT_SSH` `core.sshCommand` をユーザーが決めていればそれを使う）。終了コード 1 は、出力できなかったことを表す。別の操作（本文の取り出し、作業ツリーとの比較、範囲の確認と削除）は、サブモード（下の「collect のサブモード」）で行う。
+`scripts/collect` は差分を標準出力に出す。読み取り専用で、書き込むのは `git fetch` だけ。`--no-fetch` を付けると fetch しない（fetch は 30 秒で打ち切る。ssh の origin では `BatchMode` と `ConnectTimeout` を付けるが、`GIT_SSH_COMMAND` `GIT_SSH` `core.sshCommand` をユーザーが決めていればそれを使う）。終了コード 1 は、出力できなかったことを表す。別の操作（本文の取り出し、作業ツリーとの比較、範囲の確認と削除）は、サブモード（下の「collect のサブモード」）で行う。
 
 dotfiles 側は `HEAD` の `lib/Brewfile` と `lib/zshrc` と比べる。作業ツリーの未コミットの変更は `lib` の項目として別に出るので、未コミットの変更にしかない行は「dotfiles にある」にならない（`in-dotfiles` が立たず、Brewfile の項目も出る）。
 
@@ -49,7 +50,7 @@ dotfiles 側は `HEAD` の `lib/Brewfile` と `lib/zshrc` と比べる。作業�
   - `~/.zprofile の dotfiles ブロックが閉じていないため、ブロックの開始行より後ろを確認していません`
   - `~/.zshrc の 14 行目からの段落は、ファイルの最後か dotfiles ブロックの手前までつないでも構文として完結しない（zsh -n が通らないか、ヒアドキュメントが閉じていないか、最後の行が \ && || | で終わる）ため、そこまでを 1 項目にしています`（行番号は、その項目の `lines` の開始行。この項目は構文が完結していない。項目にならなかった段落（`brew shellenv` を含むものなど）には、この warn は出ない）
   - `~/.config/dotfiles/ignore の lib:lib/zshrc は、lib の項目はローカル専用にできないため無視しています`
-  - `~/.zprofile の 2-2 行目は brew shellenv を含む段落のため、項目にしていません（同じ段落のほかの設定も出していません）`（行の範囲は、つないだ後の段落全体）。その範囲にほかの設定があっても項目に出ないことを伝える（ユーザーが空行で `brew shellenv` の段落と分ければ、次から項目に出る。Claude はファイルを書き換えない）。
+  - `~/.zprofile の 2-2 行目は brew shellenv を含む段落のため、項目にしていません（同じ段落のほかの設定も出していません）`（行の範囲は、つないだ後の段落全体）。その範囲にほかの設定があっても項目に出ないことを伝える（ユーザーが空行で `brew shellenv` の段落と分ければ、次から項目に出る。エージェントはファイルを書き換えない）。
   - `jq が見つからないため、Brewfile の別名や古い名前（postgresql → postgresql@14 など）を読み替えていません`、`brew info --json=v2 --installed を読めなかったため、Brewfile の別名や古い名前（postgresql → postgresql@14 など）を読み替えていません`（「おすすめの決め方」の、2 件に分かれて出る項目の扱い）。
 - `=== summary`: `items`（項目数）と `ignored`（除外リストで除いた数）。除外リストの行は、行末の空白と CR を除いてから `id` と比べられる。除外されるのは `direction: local` の項目だけで、逆向きの差分は同じ `id` が除外リストにあっても出る（除外リストはローカル専用から作られるため）。`lib:` で始まる行は無視され、`=== warn` に出る（`lib` の項目はローカル専用にできない。隠すと、その未コミットの変更が取り込みの commit に混ざるため）。
 
@@ -73,7 +74,7 @@ dotfiles 側は `HEAD` の `lib/Brewfile` と `lib/zshrc` と比べる。作業�
 `collect` を実行する。出力は一時ファイルに残し、そのパスを覚えておく（4 の commit の後で段落を消すときに、サブモードがこのファイルから `body` を取り出して照らし合わせるため）。終了コード 1 なら、エラーを伝えて止める。
 
 ```sh
-out="$(mktemp)"; .claude/skills/sync-to-dotfiles/scripts/collect > "$out"; echo "終了コード: $? 出力: $out"; cat "$out"
+out="$(mktemp)"; scripts/collect > "$out"; echo "終了コード: $? 出力: $out"; cat "$out"
 ```
 
 `=== repo` を見る:
@@ -254,7 +255,7 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
 
    ```sh
    # ~/.zshrc の 5-7 行目の段落。zshrc-block が 20-22 なので 8-19 行目を見る。この回に ~/.zshrc から消す 12-13 と 15-16 は除く
-   .claude/skills/sync-to-dotfiles/scripts/collect --between ~/.zshrc 8 19 12-13 15-16
+   scripts/collect --between ~/.zshrc 8 19 12-13 15-16
    ```
 
    - `~/.zshrc` のブロックより後ろの段落: `--between ~/.zshrc <zshrc-block の終わり + 1> <lines の開始 - 1>` で `~/.zshrc` を見る。
@@ -279,14 +280,14 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
 1. 消す段落の `lines` の範囲の内容が `body` と一致することを確かめる。`collect --check` に、1 で残した出力のファイル、`kind`、ファイル、消す段落の `lines` をすべて渡す（範囲ごとに `一致` か `不一致` が出る。中身は出ない）。
 
    ```sh
-   .claude/skills/sync-to-dotfiles/scripts/collect --check "$out" zshrc ~/.zshrc 12-15 30-31
+   scripts/collect --check "$out" zshrc ~/.zshrc 12-15 30-31
    ```
 
    1 つでも不一致なら（終了コード 1）、collect を実行した後にファイルが変わっている。ファイルを書き換えずに、3 で `zsh -n` が通らないときと同じように流れ全体を止める（collect を実行し直して、もう一度選んでもらう必要がある）。
 2. 段落を除いた内容を一時ファイル（`mktemp`）に作る。`collect --without` に、消す段落の `lines` をすべて渡し、標準出力を一時ファイルにリダイレクトする（まとめて除くので、順番も行番号のずれも気にしなくてよい。消した段落の前後の空行は重なって残るが、内容には影響しない）。元のファイルは書き換わらない。
 
    ```sh
-   tmp="$(mktemp)"; .claude/skills/sync-to-dotfiles/scripts/collect --without ~/.zshrc 12-15 30-31 > "$tmp"
+   tmp="$(mktemp)"; scripts/collect --without ~/.zshrc 12-15 30-31 > "$tmp"
    ```
 
 3. `zsh -n <一時ファイル>` で構文を確かめる。通らなければ（段落の境目が `if` や関数の途中にあるなど）、ファイルを書き換えずに流れ全体を止める（残りのファイル、4 の最後の collect での確認、5 の push に進まない。4 の commit は済んでいる）。エラーの内容、そのファイルは書き換えていないこと、ここまでに済んだこと（commit したもの、まだ push していないこと）を伝え、ターンを終えてユーザーの指示を待つ。元のファイルも `zsh -n` で確かめ、元から通らないならそのことも伝える。
@@ -350,7 +351,7 @@ push するもの（1 の `ahead` が 1 以上か `unknown`、またはこの実
    - `cmd/setup` に冪等な `setup_<tool>` を足し、末尾の手順の並びに `step` と呼び出しを足す（`setup_starship` のように `cmd/common.sh` の `is_linked` / `link_file` を使う）。
    - `lib/<tool>.md` を書き、README の表に 1 行足す。
 3. **collect に検出を足す**: include 方式のように `lib` の変更として出てこないものは、そのツールの差分を集める処理を `collect` に足し、ほかの項目と同じ `=== item` の形式で出す（`kind` は新しい名前、`id` は `<kind>:<識別子>`）。`shellcheck` を通す。VS Code を加えるときは、Brewfile の `vscode` 行（拡張機能）の検出もここで足す。
-4. **setup を実行してもらう**: ユーザーに別のターミナル（Terminal.app）で `<リポジトリの絶対パス>/cmd/setup` を実行してもらう。Claude Code の `!` で実行すると、`cmd/setup` の `ask_yes_no` に答えられず、入力の終わり（EOF）が No として扱われてすべてスキップされるため。
+4. **setup を実行してもらう**: ユーザーに別のターミナル（Terminal.app）で `<リポジトリの絶対パス>/cmd/setup` を実行してもらう。スキル内から実行すると、`cmd/setup` の `ask_yes_no` に答えられず、入力の終わり（EOF）が No として扱われてすべてスキップされるため。
    - 絶対パスは `git rev-parse --show-toplevel` で求め、コピーしてそのまま実行できるコマンドの形で伝える。ターンを終え、終わったと言われるのを待つ。
    - 終わったと言われたら、ローカルのファイルがリンク（または include）に切り替わったことを `ls -l` などで確かめる。切り替わっていなければ、`cmd/setup` の最後に出たスキップと失敗を聞き、直してからもう一度実行してもらう。
 5. **commit**: 流れの 4 と同じやり方（`git add <パス>...` の後に `git commit -m '<メッセージ>' -- <パス>...`）で、ツールごとに 1 commit にする（例: `[feat] VS Code の設定を管理に加える`）。その後、流れの 5 の push の確認に戻る。

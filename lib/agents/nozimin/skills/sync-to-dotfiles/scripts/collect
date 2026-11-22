@@ -17,9 +17,9 @@ export LC_ALL=C
 # git status と git diff が .git/index を書き換えないようにする
 export GIT_OPTIONAL_LOCKS=0
 
-# リポジトリは collect の場所（.claude/skills/sync-to-dotfiles/scripts/ の 4 つ上）から求める。
-# REPO_ROOT、LIB_DIR、dotfiles ブロックの名前（MARKER）は、この cmd/common.sh のものを使う
-COMMON_SH="$(dirname "${BASH_SOURCE[0]}")/../../../../cmd/common.sh"
+# Codex は skill をキャッシュにコピーするため、~/.config/dotfiles/repo から clone を見つける。
+# REPO_ROOT、LIB_DIR、dotfiles ブロックの名前（MARKER）は、clone 内の cmd/common.sh のものを使う。
+DOTFILES_REPO_FILE="$HOME/.config/dotfiles/repo"
 IGNORE_FILE="${DOTFILES_IGNORE_FILE:-$HOME/.config/dotfiles/ignore}"
 # lib の要約で出す最大の行数と、plist の値を省略する文字数
 MAX_LINES=200
@@ -1264,14 +1264,20 @@ case "${1:-}" in
 esac
 
 command -v git >/dev/null 2>&1 || fatal "git が見つかりません"
-if [ -f "$COMMON_SH" ]; then
-  # cmd/common.sh は、shellcheck に -x を付けたときだけ読ませる（付けなければ SC1091 を出さずに飛ばす）
-  # shellcheck source-path=SCRIPTDIR/../../../.. source=cmd/common.sh disable=SC1091
-  source "$COMMON_SH"
+if [ ! -f "$DOTFILES_REPO_FILE" ]; then
+  fatal "dotfiles リポジトリの場所がありません。cmd/install_skills を実行してください"
 fi
+DOTFILES_REPO="$(cat "$DOTFILES_REPO_FILE")"
+if [ -z "$DOTFILES_REPO" ] || [ ! -f "$DOTFILES_REPO/cmd/common.sh" ] ||
+  [ ! -f "$DOTFILES_REPO/cmd/install_skills" ] || [ ! -d "$DOTFILES_REPO/lib" ]; then
+  fatal "~/.config/dotfiles/repo が dotfiles のクローンを指していません。cmd/install_skills を実行してください"
+fi
+COMMON_SH="$DOTFILES_REPO/cmd/common.sh"
+# shellcheck source=/dev/null
+source "$COMMON_SH"
 if [ -z "${REPO_ROOT:-}" ] || [ ! -d "$LIB_DIR" ] ||
   [ "$(repo_git rev-parse --show-toplevel 2>/dev/null)" != "$REPO_ROOT" ]; then
-  fatal "dotfiles リポジトリが見つかりません（collect は .claude/skills/sync-to-dotfiles/scripts/ に置きます）"
+  fatal "~/.config/dotfiles/repo が dotfiles のクローンを指していません。cmd/install_skills を実行してください"
 fi
 command -v zsh >/dev/null 2>&1 && ZSH_AVAILABLE=1
 ROOT_DIRS=$'\n'

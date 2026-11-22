@@ -27,8 +27,10 @@ git clone https://github.com/nozimin/dotfiles.git ~/WorkSpace/Repositories/dotfi
 | iTerm2 | iTerm2 が `lib/com.googlecode.iterm2.plist` を読み込み、変更を自動で保存するようにする | [lib/iterm2.md](lib/iterm2.md) |
 | GitHub (gh) | `gh auth login` でログインし、`gh auth setup-git` で git の認証に gh を使う | [lib/git.md](lib/git.md) |
 | git | `user.name` と `user.email` が未設定なら入力してもらう | [lib/git.md](lib/git.md) |
+| skills | Claude Code / Codex に `nozimin` plugin を確認してインストールする | [lib/skills.md](lib/skills.md) |
 
 `~/.zshrc` などへの追記や、既存ファイルの退避は、内容を表示して確認してから行う。最後にスキップしたものと失敗したものを表示する。失敗があれば終了コードは 1。
+skills は未インストールの場合だけ確認し、許可したときに専用の `cmd/install_skills` がインストールする。
 
 ## リポジトリを移動したとき
 
@@ -38,10 +40,11 @@ iTerm2 の手順は iTerm2 を終了しないと実行できないので、Termi
 
 ## ローカルの変更を取り込む
 
-この Mac で入れたツールや `~/.zshrc` に書いた設定のうち、共通化したいものを dotfiles に取り込む（`cmd/setup` の逆向き）。dotfiles リポジトリで Claude Code を起動し、次を実行する。
+この Mac で入れたツールや `~/.zshrc` に書いた設定のうち、共通化したいものを dotfiles に取り込む（`cmd/setup` の逆向き）。dotfiles リポジトリで Agent を起動し、次を実行する。
 
 ```
-/sync-to-dotfiles
+Claude Code: /nozimin:sync-to-dotfiles
+Codex CLI:  $nozimin:sync-to-dotfiles
 ```
 
 - Brewfile、`~/.zshrc` / `~/.zprofile`、`lib/` の未コミットの変更について、dotfiles との差分が番号付きの表で出る。各項目のおすすめ（共通化／ローカル専用／保留）を見て、変えたい番号だけ答える。
@@ -65,16 +68,18 @@ iTerm2 の手順は iTerm2 を終了しないと実行できないので、Termi
 cmd/
   setup          セットアップ本体
   install_brew   Homebrew のインストール（単体でも実行できる）
-  common.sh      共通関数（setup と install_brew から source する）
+  install_skills Claude Code と Codex への skills インストール
+  common.sh      共通関数（setup、install_brew、install_skills から source する）
 lib/
   Brewfile                     brew bundle でインストールするもの
   zshrc                        共通の zsh 設定（~/.zshrc から source する）
   starship.toml                starship の設定
   com.googlecode.iterm2.plist  iTerm2 の設定
-  *.md                         各ツールのドキュメント
-.claude/skills/sync-to-dotfiles/
-  SKILL.md         /sync-to-dotfiles の手順（Claude Code が読む）
-  scripts/collect  この Mac と dotfiles の差分を集める（読み取り専用）
+  *.md                         各ツールや Agent Skills のドキュメント
+  agents/                      Claude Code / Codex 共通 plugin と skills
+    .claude-plugin/            dotfiles marketplace
+    nozimin/                   plugin と skills
+cmd/install_skills              plugin の登録とインストール
 ```
 
 ## ツールを追加する
