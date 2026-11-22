@@ -284,7 +284,7 @@ stale_pointer_marketplace_path() {
     fi
   fi
   [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] || return 1
-  old_repo="$(cat "$REPO_POINTER")"
+  old_repo="$(skills_repo_pointer_value "$REPO_POINTER")" || return 1
   [ -n "$old_repo" ] && [ "$old_repo" != "$REPO_ROOT" ] || return 1
   old_marketplace="$old_repo/lib/agents"
   codex_marketplace_manifest_is_valid "$old_marketplace" && return 1
@@ -306,7 +306,7 @@ prepare_repo_pointer() {
     return 1
   }
   validate_repo_pointer_destination || return 1
-  if [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" = "$REPO_ROOT" ]; then
+  if [ -f "$REPO_POINTER" ] && [ "$(skills_repo_pointer_value "$REPO_POINTER")" = "$REPO_ROOT" ]; then
     return 0
   fi
   REPO_POINTER_TMP="$(mktemp "$CONFIG_DIR/.repo.XXXXXX")" || {
@@ -488,13 +488,13 @@ check_missing_cli_migrations() {
         error "$cli の dotfiles marketplace は $path に登録済みですが CLI が見つかりません。CLI を PATH に戻してから移行を再実行してください"
         return 1
       fi
-    elif { [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" != "$REPO_ROOT" ]; } ||
+    elif { [ -f "$REPO_POINTER" ] && [ "$(skills_repo_pointer_value "$REPO_POINTER")" != "$REPO_ROOT" ]; } ||
       [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
       # Older releases did not track Claude's registration separately. A stale
       # repo pointer or pending migration is enough evidence that this CLI may
       # still use the old clone, so require it before changing the shared pointer.
       repo_path=""
-      [ ! -f "$REPO_POINTER" ] || repo_path="$(cat "$REPO_POINTER")"
+      [ ! -f "$REPO_POINTER" ] || repo_path="$(skills_repo_pointer_value "$REPO_POINTER")"
       error "$cli の登録先を確認できません（repo pointer: ${repo_path:-不明}）。CLI を PATH に戻してから移行を再実行してください"
       return 1
     fi
@@ -601,13 +601,19 @@ if [ "${DOTFILES_SETUP_LOCK_OWNER_PID:-}" = "$PPID" ] && skills_lock_is_owned_by
 else
   skills_lock_acquire || exit 1
 fi
+if [ -e "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
+  skills_repo_pointer_value "$REPO_POINTER" >/dev/null || {
+    error "$REPO_POINTER は 1 行の repo path を含む通常ファイルである必要があります。手動で確認・修復してから再実行してください"
+    exit 1
+  }
+fi
 preflight_claude || exit 1
 preflight_codex || exit 1
 check_missing_cli_migrations || exit 1
 validate_managed_config_roots || exit 1
 
 MIGRATION_REQUIRED=0
-if [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" != "$REPO_ROOT" ]; then
+if [ -f "$REPO_POINTER" ] && [ "$(skills_repo_pointer_value "$REPO_POINTER")" != "$REPO_ROOT" ]; then
   MIGRATION_REQUIRED=1
 fi
 if { [ -n "$CLAUDE_MARKETPLACE_PATH" ] && [ "$CLAUDE_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; } ||

@@ -63,10 +63,14 @@ except Exception:
 
 # Detect a known clone migration before querying a CLI whose old manifest may no longer load.
 skills_repo_migration_pending() {
-  local pointer="${HOME}/.config/dotfiles/repo" pointer_repo
+  local pointer="${HOME}/.config/dotfiles/repo" pointer_value
   { [ -e "${HOME}/.config/dotfiles/repo.migrating" ] || [ -L "${HOME}/.config/dotfiles/repo.migrating" ]; } && return 0
-  pointer_repo="$(skills_repo_pointer_target "$pointer")" || return 1
-  [ "$pointer_repo" != "$REPO_ROOT" ]
+  pointer_value="$(skills_repo_pointer_value "$pointer")" || return 1
+  case "$pointer_value" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ "$pointer_value" != "$REPO_ROOT" ]
 }
 
 # Match collect's repository pointer checks before setup reports skills ready.
@@ -84,6 +88,10 @@ skills_setup_step() {
   if { [ -e "$pointer" ] || [ -L "$pointer" ]; } &&
     { [ ! -f "$pointer" ] || [ -L "$pointer" ]; }; then
     warn "$pointer は symlink または通常ファイル以外です。内容を確認し、必要なら退避して通常ファイルに直してから cmd/setup を再実行してください。自動では置き換えません"
+    return 2
+  fi
+  if [ -f "$pointer" ] && ! skills_repo_pointer_value "$pointer" >/dev/null; then
+    warn "$pointer は 1 行の repo path を含む通常ファイルである必要があります。内容を確認して手動で修復してから cmd/setup を再実行してください"
     return 2
   fi
   if command -v claude >/dev/null 2>&1; then

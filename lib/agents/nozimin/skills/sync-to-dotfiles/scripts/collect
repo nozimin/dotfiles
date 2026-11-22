@@ -120,6 +120,19 @@ function block_step(s,   n) {
 # shellcheck disable=SC2016 # 正規表現の $HOME は文字どおり
 PATH_REF_RE='(^|[^[:alnum:]_./~$"'\''-])(~|\$HOME|\$\{HOME\}|/Users)/([^][:space:]"'\''`;:(){}|&<>*?$,[\]|\\ )*|["'\''](~|\$HOME|\$\{HOME\}|/Users)/[^]"'\''`;:(){}|&<>*?$,[]*'
 
+read_single_line_file() {
+  local file="$1" value="" extra=""
+  {
+    IFS= read -r value || [ -n "$value" ] || return 1
+    if IFS= read -r extra; then
+      return 1
+    fi
+    [ -z "$extra" ] || return 1
+  } <"$file"
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
 fatal() {
   printf 'collect: %s\n' "$1" >&2
   exit 1
@@ -1278,7 +1291,7 @@ fi
 if [ ! -f "$DOTFILES_REPO_FILE" ] || [ -L "$DOTFILES_REPO_FILE" ]; then
   fatal "dotfiles リポジトリの場所がありません。cmd/install_skills を実行してください"
 fi
-DOTFILES_REPO="$(cat "$DOTFILES_REPO_FILE")" || fatal "dotfiles repo pointer を読み取れません。cmd/install_skills を実行してください"
+DOTFILES_REPO="$(read_single_line_file "$DOTFILES_REPO_FILE")" || fatal "~/.config/dotfiles/repo は 1 行の repo path を含む通常ファイルである必要があります。cmd/install_skills を実行してください"
 case "$DOTFILES_REPO" in
   /*) ;;
   *) fatal "~/.config/dotfiles/repo は絶対パスである必要があります。cmd/install_skills を実行してください" ;;

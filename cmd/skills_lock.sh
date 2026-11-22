@@ -5,11 +5,23 @@
 # Read the shared repo pointer only when it contains a canonical absolute path
 # to a dotfiles clone. collect has the same self-contained validation because
 # it is copied into each agent's plugin cache.
+skills_repo_pointer_value() {
+  local pointer="$1" value="" extra=""
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
+  {
+    IFS= read -r value || [ -n "$value" ] || return 1
+    if IFS= read -r extra; then
+      return 1
+    fi
+    [ -z "$extra" ] || return 1
+  } <"$pointer"
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
 skills_repo_pointer_target() {
   local pointer="$1" value resolved
-  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
-  IFS= read -r value <"$pointer" || [ -n "$value" ] || return 1
-  [ -n "$value" ] || return 1
+  value="$(skills_repo_pointer_value "$pointer")" || return 1
   case "$value" in
     /*) ;;
     *) return 1 ;;
