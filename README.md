@@ -34,7 +34,7 @@ skills は未インストールの場合だけ確認し、許可したときに�
 
 ## リポジトリを移動したとき
 
-`~/.zshrc` の source 行、`~/.config/starship.toml` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。Agent Skills は marketplace の再登録が別途必要なため、続けて移動先の `cmd/install_skills` も実行する。
+`~/.zshrc` の source 行、`~/.config/starship.toml` のリンク、iTerm2 の設定フォルダは、リポジトリの絶対パスを指している。移動したら、移動先の `cmd/setup` を実行し直す。古い場所を指しているものごとに、書き換えるかを確認される。Agent Skills は marketplace の再登録が別途必要なため、続けて移動先の `cmd/install_skills` も実行する。`cmd/setup` は clone 移動を検出すると skills の状態照会を skip として案内する。
 
 iTerm2 の手順は iTerm2 を終了しないと実行できないので、Terminal.app から実行する。
 

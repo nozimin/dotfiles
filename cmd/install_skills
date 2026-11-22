@@ -141,13 +141,9 @@ preflight_codex() {
   CODEX_STATE="$(codex_plugin_state_from_json "$plugins")" || return 1
 }
 
-stale_pointer_marketplace_path() {
-  local old_repo old_marketplace
-  [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] || return 1
-  old_repo="$(cat "$REPO_POINTER")"
-  [ -n "$old_repo" ] && [ "$old_repo" != "$REPO_ROOT" ] || return 1
-  old_marketplace="$old_repo/lib/agents"
-  if OLD_MARKETPLACE="$old_marketplace" python3 - <<'PY'
+codex_marketplace_manifest_is_valid() {
+  local marketplace="$1"
+  OLD_MARKETPLACE="$marketplace" python3 - <<'PY'
 import json, os
 try:
     root = os.path.realpath(os.environ["OLD_MARKETPLACE"])
@@ -162,9 +158,27 @@ except Exception:
     valid = False
 raise SystemExit(0 if valid else 1)
 PY
-  then
-    return 1
+}
+
+stale_pointer_marketplace_path() {
+  local old_repo old_marketplace
+  # A failed migration may have moved its target again. Check that recorded target
+  # before the still-valid repo pointer, since Codex may now point there.
+  if [ -f "$MIGRATION_MARKER" ] && [ ! -L "$MIGRATION_MARKER" ]; then
+    old_repo="$(cat "$MIGRATION_MARKER")"
+    if [ -n "$old_repo" ] && [ "$old_repo" != "$REPO_ROOT" ]; then
+      old_marketplace="$old_repo/lib/agents"
+      if ! codex_marketplace_manifest_is_valid "$old_marketplace"; then
+        printf '%s\n' "$old_marketplace"
+        return 0
+      fi
+    fi
   fi
+  [ -f "$REPO_POINTER" ] && [ ! -L "$REPO_POINTER" ] || return 1
+  old_repo="$(cat "$REPO_POINTER")"
+  [ -n "$old_repo" ] && [ "$old_repo" != "$REPO_ROOT" ] || return 1
+  old_marketplace="$old_repo/lib/agents"
+  codex_marketplace_manifest_is_valid "$old_marketplace" && return 1
   printf '%s\n' "$old_marketplace"
 }
 
@@ -202,7 +216,21 @@ begin_pointer_migration() {
       error "$MIGRATION_MARKER を通常ファイルとして扱えません。plugin 設定は変更していません"
       return 1
     fi
-    warn "未完了の移行を検出しました。skills は移行完了まで停止中です"
+    if [ "$(cat "$MIGRATION_MARKER")" = "$REPO_ROOT" ]; then
+      warn "未完了の移行を検出しました。skills は移行完了まで停止中です"
+      return 0
+    fi
+    MIGRATION_MARKER_TMP="$(mktemp "$CONFIG_DIR/.repo.migrating.XXXXXX")" || {
+      error "移行中 marker の移行先を更新する一時ファイルを作成できませんでした"
+      return 1
+    }
+    printf '%s\n' "$REPO_ROOT" >"$MIGRATION_MARKER_TMP" || return 1
+    mv "$MIGRATION_MARKER_TMP" "$MIGRATION_MARKER" || {
+      error "移行中 marker を新しい clone に更新できませんでした。plugin 設定は変更していません"
+      return 1
+    }
+    MIGRATION_MARKER_TMP=""
+    ok "移行中 marker を現在の clone に更新しました"
     return 0
   fi
   MIGRATION_MARKER_TMP="$(mktemp "$CONFIG_DIR/.repo.migrating.XXXXXX")" || {
@@ -264,6 +292,26 @@ install_claude_skills() {
   esac
 }
 
+codex_cache_executable_modes_match() {
+  python3 - "$1" "$2" <<'PY'
+import os, stat, sys
+source, cache = sys.argv[1:]
+for root, dirs, files in os.walk(source, followlinks=False):
+    rel_root = os.path.relpath(root, source)
+    for name in files:
+        src = os.path.join(root, name)
+        rel = os.path.normpath(os.path.join(rel_root, name))
+        dst = os.path.join(cache, rel)
+        if os.path.islink(src) or not os.path.isfile(dst) or os.path.islink(dst):
+            continue
+        src_exec = stat.S_IMODE(os.stat(src).st_mode) & 0o111
+        dst_exec = stat.S_IMODE(os.stat(dst).st_mode) & 0o111
+        if src_exec != dst_exec:
+            sys.exit(1)
+sys.exit(0)
+PY
+}
+
 install_codex_skills() {
   local cache_dir
   if [ "$CODEX_AVAILABLE" -eq 0 ]; then
@@ -295,7 +343,9 @@ install_codex_skills() {
   fi
 
   cache_dir="$CODEX_HOME/plugins/cache/dotfiles/nozimin/local"
-  if [ "$CODEX_STATE" = enabled ] && diff -qr "$REPO_ROOT/lib/agents/nozimin" "$cache_dir" >/dev/null 2>&1; then
+  if [ "$CODEX_STATE" = enabled ] &&
+    diff -qr "$REPO_ROOT/lib/agents/nozimin" "$cache_dir" >/dev/null 2>&1 &&
+    codex_cache_executable_modes_match "$REPO_ROOT/lib/agents/nozimin" "$cache_dir"; then
     ok "Codex の nozimin plugin は最新"
     return 0
   fi

@@ -72,7 +72,7 @@ dotfiles 側は `HEAD` の `lib/Brewfile` と `lib/zshrc` と比べる。作業�
 
 ### 1. 開始時の確認
 
-`~/.config/dotfiles/repo` から `repo_path` を読み、出力は一時ファイルに残す（4 の commit の後で段落を消すときに、サブモードがこのファイルから `body` を取り出して照らし合わせるため）。最初の読み取りと `collect` は helper の lock 内で行い、出力の `=== repo` `path` が `repo_path` と一致することを確かめる。これをこの実行の承認対象に固定する。終了コード 1 なら、エラーを伝えて止める。
+`~/.config/dotfiles/repo` から `repo_path` を読み、出力は一時ファイルに残す（4 の commit の後で段落を消すときに、サブモードがこのファイルから `body` を取り出して照らし合わせるため）。最初の読み取りと `collect` は helper の lock 内で行い、`collect --expect-repo` が pointer と clone の一致を検証する。出力に表示された `path` をこの実行の承認対象として記録する。終了コード 1 なら、エラーを伝えて止める。
 
 ```sh
 # Replace this value with the absolute SKILL.md path supplied by the skill loader.
@@ -83,8 +83,6 @@ collect_script="$skill_scripts/collect"
 repo_path="$(cat "$HOME/.config/dotfiles/repo")"
 out="$(mktemp)"
 if ! "$lock_script" "$repo_path" -- "$collect_script" --expect-repo "$repo_path" > "$out"; then echo "collect に失敗しました: $out"; exit 1; fi
-reported_repo="$(awk '$0 == "=== repo" { in_repo=1; next } /^===/ { in_repo=0 } in_repo && /^path: / { sub(/^path: /, ""); print; exit }' "$out")"
-[ "$reported_repo" = "$repo_path" ] || { echo "collect の repo path が pointer と一致しません"; exit 1; }
 echo "出力: $out repo: $repo_path"
 cat "$out"
 ```
@@ -310,9 +308,17 @@ zsh の段落を `lib/zshrc` に足すか、ローカルから消すかを決め
 
    ```sh
    "$lock_script" "$repo_path" -- bash -s -- "<ファイル>" "<一時ファイル>" <<'SH'
+   set -eu
    file="$1"; tmp="$2"
-   cp -p "$file" "$file.backup-$(date +%Y%m%d%H%M%S)"
-   cat "$tmp" > "$file"
+   [ -f "$file" ] && [ -r "$file" ] || { echo "元ファイルを読めません: $file" >&2; exit 1; }
+   [ -f "$tmp" ] && [ -r "$tmp" ] || { echo "一時ファイルを読めません: $tmp" >&2; exit 1; }
+   stamp="$(date +%Y%m%d%H%M%S)"
+   backup="$(mktemp "$file.backup-$stamp.XXXXXX")" || exit 1
+   stage="$(mktemp "$file.tmp.XXXXXX")" || { rm -f "$backup"; exit 1; }
+   if ! cp -p "$file" "$backup"; then rm -f "$backup" "$stage"; echo "バックアップに失敗しました: $file" >&2; exit 1; fi
+   if ! cp -p "$file" "$stage" || ! cat "$tmp" > "$stage"; then rm -f "$stage"; echo "一時ファイルを反映できませんでした: $file" >&2; exit 1; fi
+   if ! mv -f "$stage" "$file"; then rm -f "$stage"; echo "置き換えに失敗しました。元ファイルを保持しました: $file" >&2; exit 1; fi
+   echo "バックアップ: $backup"
    SH
    ```
 

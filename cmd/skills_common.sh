@@ -61,9 +61,24 @@ except Exception:
   printf '%s\n' "$state"
 }
 
+# Detect a known clone migration before querying a CLI whose old manifest may no longer load.
+skills_repo_migration_pending() {
+  local pointer="${HOME}/.config/dotfiles/repo" pointer_repo pointer_value
+  { [ -e "${HOME}/.config/dotfiles/repo.migrating" ] || [ -L "${HOME}/.config/dotfiles/repo.migrating" ]; } && return 0
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
+  pointer_value="$(cat "$pointer")"
+  [ -n "$pointer_value" ] || return 1
+  pointer_repo="$(cd "$pointer_value" 2>/dev/null && pwd -P)" || pointer_repo="$pointer_value"
+  [ "$pointer_repo" != "$REPO_ROOT" ]
+}
+
 # cmd/setup uses the same state parsing as cmd/install_skills.
 skills_setup_step() {
   local needs_install=0 have_cli=0 plugin_state codex_home="${CODEX_HOME:-$HOME/.codex}"
+  if skills_repo_migration_pending; then
+    warn "clone 移動または未完了の skills 移行を検出しました。現在の clone から cmd/install_skills を実行してください"
+    return 2
+  fi
   if command -v claude >/dev/null 2>&1; then
     have_cli=1
     plugin_state="$(claude_plugin_state)" || return 1
