@@ -16,7 +16,7 @@ shift
 shift
 [ "$#" -gt 0 ] || fatal "実行する command がありません"
 
-EXPECTED_REPO="$(cd "$EXPECTED_REPO" 2>/dev/null && pwd -P)" || fatal "確認済み repo が見つかりません"
+EXPECTED_REPO="$(cd "$EXPECTED_REPO" 2>/dev/null && pwd -P)" || fatal "repo pointer が欠落しているか古い clone を指しています。現在の dotfiles clone から cmd/install_skills を実行してください"
 CONFIG_DIR="$HOME/.config/dotfiles"
 REPO_POINTER="$CONFIG_DIR/repo"
 MIGRATION_MARKER="$CONFIG_DIR/repo.migrating"
@@ -28,7 +28,7 @@ validate_repo_target() {
   if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
     fatal "Agent Skills の移行が進行中です。移行先 clone の cmd/install_skills を再実行してから、collect と選択をやり直してください"
   fi
-  current_repo="$(skills_repo_pointer_target "$REPO_POINTER")" || fatal "repo pointer は dotfiles clone の canonical absolute path を含む通常ファイルである必要があります。symlink・相対パス・非 canonical path は使えません。cmd/install_skills を実行してください"
+  current_repo="$(skills_repo_pointer_target "$REPO_POINTER")" || fatal "repo pointer がありません、空、または有効な dotfiles clone を指していません。現在の dotfiles clone から cmd/install_skills を実行してください"
   [ "$current_repo" = "$EXPECTED_REPO" ] || fatal "確認時の repo ($EXPECTED_REPO) と現在の repo ($current_repo) が異なります。変更を行わず、collect と承認からやり直してください"
 }
 

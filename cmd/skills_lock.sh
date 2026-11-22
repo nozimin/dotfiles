@@ -9,19 +9,20 @@ skills_repo_pointer_value() {
   local pointer="$1" value="" extra=""
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
   {
-    IFS= read -r value || [ -n "$value" ] || return 1
-    if IFS= read -r extra; then
-      return 1
+    if IFS= read -r value; then
+      if IFS= read -r extra; then
+        return 1
+      fi
+      [ -z "$extra" ] || return 1
     fi
-    [ -z "$extra" ] || return 1
   } <"$pointer"
-  [ -n "$value" ] || return 1
   printf '%s\n' "$value"
 }
 
 skills_repo_pointer_target() {
   local pointer="$1" value resolved
   value="$(skills_repo_pointer_value "$pointer")" || return 1
+  [ -n "$value" ] || return 1
   case "$value" in
     /*) ;;
     *) return 1 ;;

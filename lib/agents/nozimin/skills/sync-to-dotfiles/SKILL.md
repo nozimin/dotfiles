@@ -72,7 +72,7 @@ dotfiles 側は `HEAD` の `lib/Brewfile` と `lib/zshrc` と比べる。作業�
 
 ### 1. 開始時の確認
 
-`~/.config/dotfiles/repo` から `repo_path` を読み、出力は一時ファイルに残す（4 の commit の後で段落を消すときに、サブモードがこのファイルから `body` を取り出して照らし合わせるため）。最初の読み取りと `collect` は helper の lock 内で行い、`collect --expect-repo` が pointer と clone の一致を検証する。出力に表示された `path` をこの実行の承認対象として記録する。終了コード 1 なら、エラーを伝えて止める。
+`~/.config/dotfiles/repo` から `repo_path` を読み、出力は一時ファイルに残す（4 の commit の後で段落を消すときに、サブモードがこのファイルから `body` を取り出して照らし合わせるため）。pointer がない、空、または clone が見つからない場合は、現在の dotfiles clone から `cmd/install_skills` を実行してから再開するよう案内する。最初の読み取りと `collect` は helper の lock 内で行い、`collect --expect-repo` が pointer と clone の一致を検証する。出力に表示された `path` をこの実行の承認対象として記録する。終了コード 1 なら、エラーを伝えて止める。
 
 ```sh
 # Replace this value with the absolute SKILL.md path supplied by the skill loader.
@@ -80,7 +80,16 @@ skill_file="<absolute path to this loaded SKILL.md>"
 skill_scripts="$(cd "$(dirname "$skill_file")/scripts" && pwd -P)" || exit 1
 lock_script="$skill_scripts/with-repo-lock"
 collect_script="$skill_scripts/collect"
+repo_pointer="$HOME/.config/dotfiles/repo"
+if [ ! -f "$repo_pointer" ] || [ -L "$repo_pointer" ]; then
+  echo "repo pointer がないか通常ファイルではありません。現在の dotfiles clone から cmd/install_skills を実行してください" >&2
+  exit 1
+fi
 repo_path="$(cat "$HOME/.config/dotfiles/repo")"
+if [ -z "$repo_path" ] || [ ! -d "$repo_path" ]; then
+  echo "repo pointer が空か clone が見つかりません。現在の dotfiles clone から cmd/install_skills を実行してください" >&2
+  exit 1
+fi
 out="$(mktemp)"
 if ! "$lock_script" "$repo_path" -- "$collect_script" --expect-repo "$repo_path" > "$out"; then echo "collect に失敗しました: $out"; exit 1; fi
 echo "出力: $out repo: $repo_path"
