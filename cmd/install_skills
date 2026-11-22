@@ -619,7 +619,7 @@ else
 fi
 if [ -e "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
   skills_repo_pointer_value "$REPO_POINTER" >/dev/null || {
-    error "$REPO_POINTER は 1 行の repo path を含む通常ファイルである必要があります。手動で確認・修復してから再実行してください"
+    error "$REPO_POINTER を読み取れないか、1 行の repo path ではありません。権限と内容を確認して手動で修復してから再実行してください"
     exit 1
   }
 fi

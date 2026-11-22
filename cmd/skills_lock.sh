@@ -6,16 +6,17 @@
 # to a dotfiles clone. collect has the same self-contained validation because
 # it is copied into each agent's plugin cache.
 skills_repo_pointer_value() {
-  local pointer="$1" value="" extra=""
+  local pointer="$1" raw value
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
-  {
-    if IFS= read -r value; then
-      if IFS= read -r extra; then
-        return 1
-      fi
-      [ -z "$extra" ] || return 1
-    fi
-  } <"$pointer"
+  raw="$(cat "$pointer" 2>/dev/null && printf '\001')" || return 1
+  raw="${raw%$'\001'}"
+  case "$raw" in
+    *$'\n'*)
+      value="${raw%%$'\n'*}"
+      [ -z "${raw#*$'\n'}" ] || return 1
+      ;;
+    *) value="$raw" ;;
+  esac
   printf '%s\n' "$value"
 }
 

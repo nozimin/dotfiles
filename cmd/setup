@@ -40,7 +40,7 @@ if [ -n "$EXPECTED_REPO" ]; then
     exit 1
   }
   skills_repo_pointer_matches "$CONFIG_DIR/repo" "$EXPECTED_REPO" || {
-    error "repo pointer が確認済み clone を指していません。設定を変更せず終了します"
+    error "repo pointer を確認できません。権限と内容を確認して手動で修復してください。設定を変更せず終了します"
     exit 1
   }
   [ ! -e "$CONFIG_DIR/repo.migrating" ] && [ ! -L "$CONFIG_DIR/repo.migrating" ] || {

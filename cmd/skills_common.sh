@@ -91,7 +91,7 @@ skills_setup_step() {
     return 2
   fi
   if [ -f "$pointer" ] && ! skills_repo_pointer_value "$pointer" >/dev/null; then
-    warn "$pointer は 1 行の repo path を含む通常ファイルである必要があります。内容を確認して手動で修復してから cmd/setup を再実行してください"
+    warn "$pointer を読み取れないか、1 行の repo path ではありません。権限と内容を確認して手動で修復してから cmd/setup を再実行してください"
     return 2
   fi
   if command -v claude >/dev/null 2>&1; then
