@@ -16,11 +16,13 @@ fi
 
 CLAUDE_MARKETPLACE="$REPO_ROOT/lib/agents"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+CLAUDE_CONFIG_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CONFIG_DIR="$HOME/.config/dotfiles"
 REPO_POINTER="$CONFIG_DIR/repo"
 MIGRATION_MARKER="$CONFIG_DIR/repo.migrating"
 CODEX_MARKETPLACE_POINTER="$CONFIG_DIR/codex-marketplace"
 CLAUDE_MARKETPLACE_POINTER="$CONFIG_DIR/claude-marketplace"
+PROFILE_POINTER="$CONFIG_DIR/skills-profile"
 # shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
 INSTALL_LOCK_DIR="$CONFIG_DIR/install_skills.lock"
 REPO_POINTER_TMP=""
@@ -29,6 +31,8 @@ CODEX_MARKETPLACE_ERROR_TMP=""
 CODEX_MARKETPLACE_PATH_TMP=""
 CLAUDE_MARKETPLACE_PATH_TMP=""
 CLI_STATUS_TMP=""
+PROFILE_TMP=""
+PROFILE_STATE=""
 CLAUDE_AVAILABLE=0
 CODEX_AVAILABLE=0
 CLAUDE_MARKETPLACE_PATH=""
@@ -40,6 +44,82 @@ LOCK_HELD=0
 INITIAL_REPO_POINTER_PRESENT=0
 INITIAL_MIGRATION_MARKER_PRESENT=0
 
+validate_managed_config_roots() {
+  local pointer registered_path active_path cli available
+  PROFILE_STATE="$(python3 - "$CLAUDE_CONFIG_HOME" "$CODEX_HOME" <<'PY'
+import json, os, sys
+print(json.dumps({"claude": os.path.realpath(sys.argv[1]),
+                  "codex": os.path.realpath(sys.argv[2])}, separators=(",", ":")))
+PY
+)" || {
+    error "Claude Code / Codex の設定 profile を確認できませんでした"
+    return 1
+  }
+  if [ -e "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+    if [ ! -f "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+      error "$PROFILE_POINTER は通常ファイルではありません。設定 profile を確認できません"
+      return 1
+    fi
+    if [ "$(cat "$PROFILE_POINTER")" != "$PROFILE_STATE" ]; then
+      error "Agent Skills は別の Claude/Codex profile ($PROFILE_POINTER) に結び付いています。元の CLAUDE_CONFIG_DIR / CODEX_HOME に戻してください。profile ごとの repo pointer は未対応です"
+      return 1
+    fi
+  fi
+  # Before profile binding existed, per-CLI sidecars may be the only evidence
+  # that a different profile owns an existing registration. Never claim that
+  # legacy global state from a profile which reports no corresponding entry.
+  for cli in claude codex; do
+    case "$cli" in
+      claude)
+        pointer="$CLAUDE_MARKETPLACE_POINTER"
+        available="$CLAUDE_AVAILABLE"
+        active_path="$CLAUDE_MARKETPLACE_PATH"
+        ;;
+      codex)
+        pointer="$CODEX_MARKETPLACE_POINTER"
+        available="$CODEX_AVAILABLE"
+        active_path="$CODEX_MARKETPLACE_PATH"
+        ;;
+    esac
+    [ "$available" -eq 1 ] || continue
+    [ -f "$pointer" ] && [ ! -L "$pointer" ] || continue
+    registered_path="$(cat "$pointer")"
+    [ -n "$registered_path" ] && [ "$registered_path" != unused ] || continue
+    if [ -z "$active_path" ]; then
+      error "$pointer は $registered_path への登録を記録していますが、この $cli profile では登録を確認できません。登録元の CLAUDE_CONFIG_DIR / CODEX_HOME で移行してください"
+      return 1
+    fi
+  done
+}
+
+record_managed_config_roots() {
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
+  if [ -e "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+    if [ ! -f "$PROFILE_POINTER" ] || [ -L "$PROFILE_POINTER" ]; then
+      error "$PROFILE_POINTER は通常ファイルではありません"
+      return 1
+    fi
+    if [ "$(cat "$PROFILE_POINTER")" = "$PROFILE_STATE" ]; then
+      return 0
+    fi
+    error "Agent Skills の設定 profile が実行環境と一致しません"
+    return 1
+  fi
+  PROFILE_TMP="$(mktemp "$CONFIG_DIR/.skills-profile.XXXXXX")" || {
+    error "設定 profile を記録する一時ファイルを作成できませんでした"
+    return 1
+  }
+  printf '%s\n' "$PROFILE_STATE" >"$PROFILE_TMP" || return 1
+  mv "$PROFILE_TMP" "$PROFILE_POINTER" || {
+    error "設定 profile を記録できませんでした"
+    return 1
+  }
+  PROFILE_TMP=""
+}
+
 cleanup() {
   [ -z "$REPO_POINTER_TMP" ] || rm -f "$REPO_POINTER_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f "$MIGRATION_MARKER_TMP"
@@ -47,6 +127,7 @@ cleanup() {
   [ -z "$CODEX_MARKETPLACE_PATH_TMP" ] || rm -f "$CODEX_MARKETPLACE_PATH_TMP"
   [ -z "$CLAUDE_MARKETPLACE_PATH_TMP" ] || rm -f "$CLAUDE_MARKETPLACE_PATH_TMP"
   [ -z "$CLI_STATUS_TMP" ] || rm -f "$CLI_STATUS_TMP"
+  [ -z "$PROFILE_TMP" ] || rm -f "$PROFILE_TMP"
   skills_lock_release
 }
 trap cleanup EXIT
@@ -332,6 +413,9 @@ record_claude_marketplace_path() {
       error "$CLAUDE_MARKETPLACE_POINTER は通常ファイルではありません"
       return 1
     fi
+    if [ "$(cat "$CLAUDE_MARKETPLACE_POINTER")" = "$CLAUDE_MARKETPLACE_PATH" ]; then
+      return 0
+    fi
   fi
   CLAUDE_MARKETPLACE_PATH_TMP="$(mktemp "$CONFIG_DIR/.claude-marketplace.XXXXXX")" || {
     error "Claude marketplace path を記録する一時ファイルを作成できませんでした"
@@ -347,6 +431,10 @@ record_claude_marketplace_path() {
 
 record_cli_unused() {
   local pointer="$1"
+  mkdir -p "$CONFIG_DIR" || {
+    error "$CONFIG_DIR を作成できませんでした"
+    return 1
+  }
   if [ -e "$pointer" ] || [ -L "$pointer" ]; then
     if [ ! -f "$pointer" ] || [ -L "$pointer" ]; then
       error "$pointer は通常ファイルではありません"
@@ -438,6 +526,9 @@ record_codex_marketplace_path() {
       error "$CODEX_MARKETPLACE_POINTER は通常ファイルではありません"
       return 1
     fi
+    if [ "$(cat "$CODEX_MARKETPLACE_POINTER")" = "$CODEX_MARKETPLACE_PATH" ]; then
+      return 0
+    fi
   fi
   CODEX_MARKETPLACE_PATH_TMP="$(mktemp "$CONFIG_DIR/.codex-marketplace.XXXXXX")" || {
     error "Codex marketplace path を記録する一時ファイルを作成できませんでした"
@@ -507,6 +598,7 @@ fi
 preflight_claude || exit 1
 preflight_codex || exit 1
 check_missing_cli_migrations || exit 1
+validate_managed_config_roots || exit 1
 
 MIGRATION_REQUIRED=0
 if [ -f "$REPO_POINTER" ] && [ "$(cat "$REPO_POINTER")" != "$REPO_ROOT" ]; then
@@ -526,13 +618,27 @@ if [ "$MIGRATION_REQUIRED" -eq 1 ]; then
   }
 fi
 
-prepare_repo_pointer || exit 1
 if [ -e "$REPO_POINTER" ] || [ -L "$REPO_POINTER" ]; then
   INITIAL_REPO_POINTER_PRESENT=1
 fi
 if [ -e "$MIGRATION_MARKER" ] || [ -L "$MIGRATION_MARKER" ]; then
   INITIAL_MIGRATION_MARKER_PRESENT=1
 fi
+record_managed_config_roots || exit 1
+# Record an absent CLI before creating the first migration marker. If the first
+# installed CLI then fails, retry can distinguish this clean profile from an
+# older installation whose omitted CLI registration is unknown.
+if [ "$INITIAL_REPO_POINTER_PRESENT" -eq 0 ] &&
+  [ "$INITIAL_MIGRATION_MARKER_PRESENT" -eq 0 ]; then
+  if [ "$CLAUDE_AVAILABLE" -eq 0 ]; then
+    record_cli_unused "$CLAUDE_MARKETPLACE_POINTER" || exit 1
+  fi
+  if [ "$CODEX_AVAILABLE" -eq 0 ]; then
+    record_cli_unused "$CODEX_MARKETPLACE_POINTER" || exit 1
+  fi
+fi
+
+prepare_repo_pointer || exit 1
 if [ "$MIGRATION_REQUIRED" -eq 1 ] || [ -n "$REPO_POINTER_TMP" ]; then
   begin_pointer_migration || exit 1
 fi
@@ -541,17 +647,6 @@ step "Claude Code"
 install_claude_skills || exit 1
 step "Codex"
 install_codex_skills || exit 1
-
-if [ "$CLAUDE_AVAILABLE" -eq 0 ] &&
-  [ "$INITIAL_REPO_POINTER_PRESENT" -eq 0 ] &&
-  [ "$INITIAL_MIGRATION_MARKER_PRESENT" -eq 0 ]; then
-  record_cli_unused "$CLAUDE_MARKETPLACE_POINTER" || exit 1
-fi
-if [ "$CODEX_AVAILABLE" -eq 0 ] &&
-  [ "$INITIAL_REPO_POINTER_PRESENT" -eq 0 ] &&
-  [ "$INITIAL_MIGRATION_MARKER_PRESENT" -eq 0 ]; then
-  record_cli_unused "$CODEX_MARKETPLACE_POINTER" || exit 1
-fi
 
 if [ -n "$REPO_POINTER_TMP" ]; then
   mv "$REPO_POINTER_TMP" "$REPO_POINTER" || {
