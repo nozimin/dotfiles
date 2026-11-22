@@ -2,6 +2,13 @@
 # この Mac の設定と dotfiles リポジトリの差分を集め、決まった形式で標準出力に出す。
 # /sync-to-dotfiles の skill が読む。読み取り専用で、書き込むのは git fetch だけ。
 # 使い方: collect [--no-fetch]
+# サブモード（どれも読み取り専用。結果は標準出力だけに出し、ファイルは書き換えない。<出力ファイル> は collect の出力を保存したもの）:
+#   collect --body <出力ファイル> <kind> <lines>                段落の body（先頭の 4 スペースを外したもの）を出す
+#   collect --in-worktree <出力ファイル> <kind> <lines>         その段落が作業ツリーの lib/zshrc にあるか（yes / no）
+#   collect --check <出力ファイル> <kind> <ファイル> <lines>...  ファイルの範囲が body と一致するか（中身は出さない）
+#   collect --between <ファイル> <from> <to|end> [skip...]      間に残るコードの行の行番号（中身は出さない）
+#   collect --without <ファイル> <lines>...                    範囲を除いた内容（リダイレクト用。端末には出さない）
+#   collect --diff <パス>...                                    lib/ のファイルの差分（秘密と判定した値は ***）
 # テストでは HOME、PATH（偽の brew）、DOTFILES_IGNORE_FILE（除外リスト）を差し替えられる。
 # shellcheck disable=SC2088 # メッセージ中の ~ は表示用。case のパターンの ~ は文字どおり
 
@@ -34,13 +41,28 @@ BREW_RENAMES_READ=0
 # dotfiles 側（HEAD の lib/Brewfile と lib/zshrc）の内容
 HEAD_BREWFILE=""
 HEAD_ZSHRC=""
-# HEAD の lib/zshrc のコメントでない行を、前後の空白を除いて改行でつなぎ、前後にも改行を付けたもの（in_dotfiles で使う）
+# HEAD の lib/zshrc のコメントでない行を、前後の空白を除いて改行でつなぎ、前後にも改行を付けたもの（in_dotfiles の絞り込みで使う）
 HEAD_ZSHRC_LINES=""
 # content_flags の結果（フラグのカンマ区切りと、秘密と判定した値を *** に置き換えた内容）
 FLAGS=""
 MASKED=""
+# content_flags に、呼び出し側で見つけた secret と unscanned を渡す（plist の data: の値。使うと 0 に戻る）
+FORCE_SECRET=0
+FORCE_UNSCANNED=0
+# noncomment_lines の結果
+NONCOMMENT=""
+# base64 を戻すコマンド（macOS は -D、GNU は -d。最初に使うときに決める）
+BASE64_DECODE=""
+# git fetch を待つ秒数
+FETCH_TIMEOUT="${COLLECT_FETCH_TIMEOUT:-30}"
+# zsh があるか（構文の確認と、トップレベルの判定に使う）
+ZSH_AVAILABLE=0
+# plist_check_data の結果（data: の値を調べた後の変更）
+PLIST_CHANGES=""
+# lib_summary の結果（本文）
+BODY=""
 # / 直下に実在するディレクトリ（/opt など。リンク先がディレクトリのものも）を改行でつなぎ、前後にも改行を付けたもの
-# （scan_secrets で、/ で始まる値がパスかを見分けるのに使う）
+# （analyze で、/ で始まる値がパスかを見分けるのに使う）
 ROOT_DIRS=""
 
 # UTF-8 の文字数を数える awk の関数（LC_ALL=C で、続きのバイト 0x80-0xBF を数えない）
@@ -74,6 +96,24 @@ function code(s,   i, c, q, start) {
   return s
 }'
 
+# dotfiles ブロックの判定（cmd/common.sh の has_block と同じ。cmd/setup の `# >>> dotfiles >>>` と cmd/install_brew の
+# `# >>> dotfiles: homebrew >>>` のように、開始のマーカー `# >>> <名前> >>>` を含む行から、同じ名前の終了のマーカー
+# `# <<< <名前> <<<` を含む行まで。名前は MARKER（dotfiles）か `MARKER: <名前>`。`dotfiles-work` などは含まない）。
+# 判定はこの 1 か所だけにし、使う awk は 1 行ごとに block_step を呼ぶ。ブロックの中（開始行と終了行を含む）なら 1、
+# 外なら 0 を返し、blk_first（開始行）、blk_last（終了行）、blk_open（開いたまま）を更新する。閉じていないブロックは最後まで。
+# awk には -v marker=<MARKER> を渡す
+AWK_BLOCK='
+function block_step(s,   n) {
+  if (!blk_open) {
+    if (!match(s, "# >>> " marker "(: [^>]+)? >>>")) return 0
+    n = substr(s, RSTART + 6, RLENGTH - 10)
+    blk_open = blk_first = 1; blk_end = "# <<< " n " <<<"
+  } else blk_first = 0
+  blk_last = (index(s, blk_end) > 0)
+  if (blk_last) blk_open = 0
+  return 1
+}'
+
 # ~/... $HOME/... ${HOME}/... /Users/... の形のパス（直前は行頭か、パスに使わない文字）。
 # 引用符の直後から始まるものは閉じる引用符の手前まで（空白を含む）、そうでないものは \ でエスケープした空白を含む
 # shellcheck disable=SC2016 # 正規表現の $HOME は文字どおり
@@ -90,8 +130,13 @@ repo_git() { git -C "$REPO_ROOT" -c core.quotePath=false "$@"; }
 
 brew_cmd() { HOMEBREW_NO_AUTO_UPDATE=1 brew "$@" 2>/dev/null; }
 
-# 標準入力の各行の先頭に 4 スペースを付ける
-indent() { sed 's/^/    /'; }
+# indent <テキスト>: 各行の先頭に 4 スペースを付けて出す
+indent() {
+  local line
+  while IFS= read -r line; do
+    printf '    %s\n' "$line"
+  done <<<"$1"
+}
 
 # 標準入力を MAX_LINES 行まで出す。超えたら、省略したことを書く
 head_lines() {
@@ -141,7 +186,7 @@ emit_item() {
     printf 'lines: %s\n' "$6"
   fi
   printf 'direction: %s\nflags: %s\nbody:\n' "$3" "${flags:--}"
-  printf '%s\n' "$5" | indent
+  indent "$5"
 }
 
 # --- フラグ（§6） ---
@@ -152,25 +197,6 @@ has_flag() {
     *",$2,"*) return 0 ;;
   esac
   return 1
-}
-
-# 標準入力の各行を、コードの部分（行末のコメントを除いた部分）にして出す
-code_part() { awk "$AWK_CODE"'{ print code($0) }'; }
-
-# コードの部分に $HOME の絶対パスを含むか（/Users/foo に対して /Users/foobar は数えない）
-has_home_path() {
-  local home="${HOME%/}"
-  [ -n "$home" ] || return 1
-  printf '%s\n' "$1" | HOME_DIR="$home" awk "$AWK_CODE"'
-    {
-      s = code($0)
-      while ((i = index(s, ENVIRON["HOME_DIR"])) > 0) {
-        s = substr(s, i + length(ENVIRON["HOME_DIR"]))
-        if (s !~ /^[[:alnum:]_.-]/) { found = 1; exit }
-      }
-    }
-    END { exit !found }
-  '
 }
 
 # ~/... $HOME/... ${HOME}/... の形のパスを、$HOME の値で始まる形にして出す（ほかの形はそのまま）
@@ -184,21 +210,43 @@ expand_home() {
   esac
 }
 
-# コードの部分で、存在しないパスを参照しているか
+# has_missing_path <コードの部分の行>: 存在しないパスを参照しているか。analyze が、パスを含みうる行（~/ $HOME/ ${HOME}/ /Users/ を
+# 含むコードの部分）だけを渡す
 has_missing_path() {
   local ref
+  [ -n "$1" ] || return 1
   while IFS= read -r ref; do
+    # 前の文字（パスの前の区切りか引用符）を除く
+    case "$ref" in
+      "~"* | '$'* | /*) ;;
+      *) ref="${ref:1}" ;;
+    esac
     [ -e "$(expand_home "${ref//\\ / }")" ] || return 0
-  done < <(printf '%s\n' "$1" | code_part | grep -oE "$PATH_REF_RE" | sed 's|^[^~$/]||')
+  done < <(grep -oE "$PATH_REF_RE" <<<"$1")
   return 1
 }
 
-# scan_secrets <モード>: 標準入力から秘密情報（§6 の secret の条件）を探し、秘密と判定した値を *** に置き換えて出す。
-# モードは text、diff（git diff。差分の行は先頭の 1 文字を除いて調べる）、plist（plist_changes の形。文字列の値を
-# 調べる）。秘密情報が見つかれば終了コード 0。複数行にわたる値（閉じ引用符が後の行にある値、YAML の キー: | の
-# ブロック）は、続きの行も置き換える
-scan_secrets() {
-  ROOT_DIRS="$ROOT_DIRS" awk -v mode="$1" '
+# analyze <モード>: 標準入力を調べ、秘密情報（§6 の secret の条件）と判定した値を *** に置き換えた内容を標準出力に出し、
+# 最後に \034 に続けて「フラグの文字 \035 パスを含みうる行」を出す（content_flags が読む）。1 回の awk で、secret、
+# home-path、garbage、unscanned の判定と、missing-path のために調べるパスを含みうる行の抜き出しをする。
+# モードは text（全部の行が対象）、diff（git diff。差分の行は先頭の 1 文字を除いて調べる。置き換えはすべての行に行うが、
+# フラグは足された + の行だけで判定する）、plist（plist_changes の形。文字列の値を調べる。置き換えは前後の値に行うが、
+# フラグは変更後の値だけで判定する）。複数行にわたる値（閉じ引用符が後の行にある値、YAML の キー: | のブロック）は、
+# 続きの行も置き換える。フラグの文字は S（secret）、H（home-path）、G（garbage）、U（unscanned。diff がバイナリ）
+analyze() {
+  ROOT_DIRS="$ROOT_DIRS" HOME_DIR="${HOME%/}" awk -v mode="$1" -v long="$LONG_LINE_CHARS" -v blank="$BLANK_LINE_CHARS" "$AWK_UTF8$AWK_CODE"'
+    # 判定の対象の行の、secret 以外のフラグ（garbage、home-path）と、パスを含みうるコードの部分
+    function check_line(s,   c, t, i) {
+      if (nchars(s) >= long || (s ~ /^[[:space:]]+$/ && nchars(s) >= blank)) garbage = 1
+      c = code(s)
+      t = c
+      if (ENVIRON["HOME_DIR"] != "" && !home)
+        while ((i = index(t, ENVIRON["HOME_DIR"])) > 0) {
+          t = substr(t, i + length(ENVIRON["HOME_DIR"]))
+          if (t !~ /^[[:alnum:]_.-]/) { home = 1; break }
+        }
+      if (index(c, "~/") || index(c, "$HOME/") || index(c, "${HOME}/") || index(c, "/Users/")) paths = paths c "\n"
+    }
     function secret_name(n) {
       n = toupper(n)
       return n ~ /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL/ || n ~ /_KEY$/
@@ -376,7 +424,7 @@ scan_secrets() {
     # 行の中の秘密情報の範囲を span_s / span_e に入れ、見つかれば真。複数行にわたる値の続きの行は、
     # 値の部分（閉じ引用符の手前まで、ブロックの行は字下げの後ろ）を置き換え、ほかは調べない
     function scan(s) {
-      nspan = 0; cur = s
+      nspan = 0; cur = s; found_key = 0
       if (continued(s)) return nspan > 0 || found_key
       private_key(s)
       config_pair(s)
@@ -407,69 +455,112 @@ scan_secrets() {
       }
       return out substr(s, p)
     }
-    # plist の値。文字列は "" の中を \n で行に分けて調べる（data、数値、日付、真偽値は見ない）
-    function masked_value(v,   n, parts, i, out) {
-      if (v !~ /^".*"$/) return v
+    # plist の値。文字列は "" の中を \n で行に分けて調べる（data、数値、日付、真偽値は見ない）。count が真なら、
+    # 変更後の値なので、secret とほかのフラグの判定にも使う
+    function masked_value(v, count,   n, parts, i, out, p) {
+      if (v !~ /^".*"$/) { if (count && v !~ /^data:/) check_line(v); return v }
       in_key = 0; cont_q = block_col = ""
       n = split(substr(v, 2, length(v) - 2), parts, /\\n/)
       out = ""
-      for (i = 1; i <= n; i++) { if (scan(parts[i])) found = 1; out = out (i > 1 ? "\\n" : "") masked(parts[i]) }
+      for (i = 1; i <= n; i++) {
+        if (scan(parts[i]) && count) secret = 1
+        if (count) { p = parts[i]; gsub(/\\t/, "\t", p); check_line(p) }
+        out = out (i > 1 ? "\\n" : "") masked(parts[i])
+      }
       return "\"" out "\""
     }
-    mode == "text" { if (scan($0)) found = 1; print masked($0); next }
-    # 差分の見出し（最初の @@ より前）はそのまま出す
-    # 差分の見出し（最初の @@ より前）はそのまま出す。複数行にわたる値は、hunk をまたいでは続けない
+    mode == "text" { if (scan($0)) secret = 1; check_line($0); print masked($0); next }
+    # 差分の見出し（最初の @@ より前）はそのまま出す（バイナリの差分は中身を調べられないので unscanned）。複数行にわたる値は、
+    # hunk をまたいでは続けない。@@ の行と \ No newline の行は、置き換えだけをする
     mode == "diff" {
       if (/^@@/) { hunk = 1; cont_q = block_col = "" }
-      if (!hunk) print
-      else if (/^[-+ ]/) { s = substr($0, 2); if (scan(s)) found = 1; print substr($0, 1, 1) masked(s) }
-      else { if (scan($0)) found = 1; print masked($0) }
+      if (!hunk) { if (/^Binary files / || /^GIT binary patch/) unscanned = 1; print; next }
+      c = substr($0, 1, 1)
+      if (c == "+" || c == "-" || c == " ") {
+        s = substr($0, 2); hit = scan(s)
+        if (c == "+") { if (hit) secret = 1; check_line(s) }
+        print c masked(s)
+      } else { scan($0); print masked($0) }
       next
     }
-    mode == "plist" { split($0, f, "\t"); print f[1] "\t" masked_value(f[2]) "\t" masked_value(f[3]) }
-    END { exit !found }
+    mode == "plist" { split($0, cols, "\t"); print cols[1] "\t" masked_value(cols[2], 0) "\t" masked_value(cols[3], 1) }
+    END { printf "\034%s%s%s%s\035%s", secret ? "S" : "", home ? "H" : "", garbage ? "G" : "", unscanned ? "U" : "", paths }
   '
 }
 
-# LONG_LINE_CHARS 文字以上の行か、BLANK_LINE_CHARS 文字以上の空白だけの行があるか
-has_garbage() {
-  printf '%s\n' "$1" | awk -v long="$LONG_LINE_CHARS" -v blank="$BLANK_LINE_CHARS" "$AWK_UTF8"'
-    nchars($0) >= long || (/^[[:space:]]+$/ && nchars($0) >= blank) { found = 1; exit }
-    END { exit !found }
-  '
-}
-
-# 標準入力のコメントでない行を、前後の空白を除いて 1 行ずつ出す
+# noncomment_lines <テキスト>: コメントでない行を、前後の空白を除いて改行でつないだものを NONCOMMENT に入れる
 noncomment_lines() {
-  awk '
+  local line out=""
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      "" | "#"*) continue ;;
+    esac
+    out="$out${out:+$'\n'}$line"
+  done <<<"$1"
+  NONCOMMENT="$out"
+}
+
+# top_level_match <lib/zshrc の内容> <段落のコメントでない行（noncomment_lines の形）>: その行の並びが、lib/zshrc の
+# トップレベル（if や関数やヒアドキュメントの外）に、同じ順で連続して現れるか。前後の空白を除いて比べて当たった範囲が、
+# 範囲だけで構文として完結し（zsh_complete）、その手前までも完結していれば、トップレベルとする（if ... then の中の
+# 字下げした行に、トップレベルの同じ行が当たらないように）。zsh が無いときは、字下げのない行から始まる一致だけを見る
+top_level_match() {
+  local start end col0 region prefix
+  while read -r start end col0; do
+    if [ "$ZSH_AVAILABLE" -eq 1 ]; then
+      region="$(printf '%s\n' "$1" | sed -n "${start},${end}p")"
+      zsh_complete "$region" || continue
+      [ "$start" -eq 1 ] && return 0
+      prefix="$(printf '%s\n' "$1" | sed -n "1,$((start - 1))p")"
+      zsh_complete "$prefix" && return 0
+    elif [ "$col0" -eq 1 ]; then
+      return 0
+    fi
+  done < <(printf '%s\n' "$1" | PAT="$2" awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    BEGIN { n = split(ENVIRON["PAT"], p, "\n") }
     /^[[:space:]]*(#|$)/ { next }
-    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print }
-  '
+    { f[++m] = trim($0); r[m] = NR; c[m] = ($0 ~ /^[^[:space:]]/) }
+    END {
+      for (i = 1; i + n - 1 <= m; i++) {
+        for (j = 1; j <= n && f[i + j - 1] == p[j]; j++) ;
+        if (j > n) print r[i], r[i + n - 1], c[i] + 0
+      }
+    }
+  ')
+  return 1
 }
 
-# in_dotfiles <段落のコメントでない行（noncomment_lines の形）>: その行の並びが、HEAD の lib/zshrc のコメントでない行の
-# 中に、同じ順で連続して現れるか（関数から 1 行抜いたような変形版は当たらない。差分を見せずに消されないように）。
-# 作業ツリーと比べると、未コミットの変更にしかない行も dotfiles にあることになり、その変更を破棄したときに
-# 設定がどこにも残らなくなる
+# in_dotfiles <段落のコメントでない行（noncomment_lines の形）>: その行の並びが、HEAD の lib/zshrc のトップレベルに、
+# 同じ順で連続して現れるか（関数から 1 行抜いたような変形版や、if の中の同じ行は当たらない。差分を見せずに消されない
+# ように）。作業ツリーと比べると、未コミットの変更にしかない行も dotfiles にあることになり、その変更を破棄したときに
+# 設定がどこにも残らなくなるので、HEAD と比べる（作業ツリーと比べるのは --in-worktree だけ）。
+# 先に bash の文字列の比較で絞り込み、当たったときだけ top_level_match で調べる
 in_dotfiles() {
-  [ -n "$HEAD_ZSHRC" ] && [[ "$HEAD_ZSHRC_LINES" == *$'\n'"$1"$'\n'* ]]
+  [ -n "$HEAD_ZSHRC" ] && [[ "$HEAD_ZSHRC_LINES" == *$'\n'"$1"$'\n'* ]] && top_level_match "$HEAD_ZSHRC" "$1"
 }
 
-# content_flags <内容> [<モード> <本文>]: 内容だけで決まるフラグを FLAGS にカンマ区切りで入れる。
-# secret だけは、本文を渡せば本文で判定する（モードは scan_secrets と同じ。lib では、足された内容だけでなく
-# 本文に出すすべての行で判定するため）。秘密情報は 1 回のスキャンで判定と置き換えを行い、秘密と判定した値を
-# *** に置き換えた本文（渡さなければ内容）を MASKED に入れる
+# content_flags <モード> <内容>: 内容を analyze（モードは analyze と同じ）で 1 回だけ調べ、内容だけで決まるフラグを FLAGS に
+# カンマ区切りで入れ、秘密と判定した値を *** に置き換えた内容を MASKED に入れる。フラグはモードごとの判定の対象
+# （diff なら足された行、plist なら変更後の値）だけで決まり、置き換えは内容のすべての行に行う。
+# FORCE_SECRET と FORCE_UNSCANNED が 1 なら、呼び出し側で見つけたものとして secret と unscanned を足す
 content_flags() {
-  local out
-  FLAGS=""
-  has_home_path "$1" && FLAGS="$FLAGS,home-path"
-  has_missing_path "$1" && FLAGS="$FLAGS,missing-path"
-  # $( ) が末尾の改行を落とさないよう、終了コード（秘密情報があれば 0）を後ろに付けて受け取る
-  out="$(printf '%s\n' "${3-$1}" | scan_secrets "${2:-text}"; echo "/$?")"
-  [ "${out##*/}" = 0 ] && FLAGS="$FLAGS,secret"
-  out="${out%/*}"
+  local out tail letters
+  out="$(printf '%s\n' "$2" | analyze "$1")"
+  tail="${out##*$'\034'}"
+  out="${out%$'\034'*}"
   MASKED="${out%$'\n'}"
-  has_garbage "$1" && FLAGS="$FLAGS,garbage"
+  letters="${tail%%$'\035'*}"
+  FLAGS=""
+  [[ "$letters" == *H* ]] && FLAGS="$FLAGS,home-path"
+  has_missing_path "${tail#*$'\035'}" && FLAGS="$FLAGS,missing-path"
+  { [[ "$letters" == *S* ]] || [ "$FORCE_SECRET" -eq 1 ]; } && FLAGS="$FLAGS,secret"
+  { [[ "$letters" == *U* ]] || [ "$FORCE_UNSCANNED" -eq 1 ]; } && FLAGS="$FLAGS,unscanned"
+  [[ "$letters" == *G* ]] && FLAGS="$FLAGS,garbage"
+  FORCE_SECRET=0 FORCE_UNSCANNED=0
+  return 0
 }
 
 # --- repo ---
@@ -485,12 +576,34 @@ read_status() {
   done < <(repo_git status --porcelain -z --no-renames --untracked-files=all)
 }
 
+# git fetch を、固まらないように時間を区切って実行する。
+# ・ユーザーが ssh のコマンドを自分で決めていれば（GIT_SSH_COMMAND、GIT_SSH、core.sshCommand）、それを使い、
+#   オプションは足さない（ssh 以外のコマンドかもしれないため）。決めていなければ BatchMode と ConnectTimeout を付ける
+# ・パスワードの入力は待たない（GIT_TERMINAL_PROMPT=0）。HTTP は転送が止まったままなら切る（http.lowSpeedTime）
+# ・全体を FETCH_TIMEOUT 秒で切る。macOS には timeout が標準で無いので、timeout か gtimeout があれば使い、
+#   無ければ perl の alarm を使う（どれも無ければ、上のオプションだけで待つ）
+fetch_origin() {
+  local wrap=()
+  if [ -z "${GIT_SSH_COMMAND:-}" ] && [ -z "${GIT_SSH:-}" ] && [ -z "$(repo_git config --get core.sshCommand 2>/dev/null)" ]; then
+    export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10'
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    wrap=(timeout "$FETCH_TIMEOUT")
+  elif command -v gtimeout >/dev/null 2>&1; then
+    wrap=(gtimeout "$FETCH_TIMEOUT")
+  elif command -v perl >/dev/null 2>&1; then
+    wrap=(perl -e 'alarm shift; exec @ARGV or exit 127' "$FETCH_TIMEOUT")
+  fi
+  GIT_TERMINAL_PROMPT=0 "${wrap[@]}" git -C "$REPO_ROOT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
+    fetch --quiet origin >/dev/null 2>&1
+}
+
 print_repo() {
   local branch behind=unknown ahead=unknown counts path
   if ! branch="$(repo_git symbolic-ref --short -q HEAD)"; then
     branch=HEAD
     add_warning "ブランチにいない（detached HEAD）ため、behind と ahead を数えていません"
-  elif [ "$NO_FETCH" -eq 0 ] && ! GIT_TERMINAL_PROMPT=0 repo_git fetch --quiet origin >/dev/null 2>&1; then
+  elif [ "$NO_FETCH" -eq 0 ] && ! fetch_origin; then
     add_warning "git fetch に失敗したため、behind と ahead を数えていません"
   elif ! repo_git rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null; then
     add_warning "origin/$branch が無いため、behind と ahead を数えていません"
@@ -530,7 +643,7 @@ sources_lib() {
   return 1
 }
 
-# ~/.zshrc の dotfiles ブロックの行の範囲（zshrc-block。無ければ none）と、ブロックの中にこのリポジトリの lib/zshrc を
+# ~/.zshrc の dotfiles ブロック（AWK_BLOCK）の行の範囲（zshrc-block。無ければ none）と、ブロックの中にこのリポジトリの lib/zshrc を
 # 読み込む行があるか（zshrc-sources-lib）を出す。skill は、段落をローカルから消してよいか（消した設定が lib/zshrc から
 # 読み込まれるか）と、消した段落が実行されるようになる位置を、これで判断する。ブロックが複数あるときは lib/zshrc を
 # 読み込むものを、無ければ最初のものを出す。閉じていないブロックはファイルの最後までとする
@@ -544,11 +657,13 @@ print_zshrc_block() {
         sources=yes
         break
       fi
-    done < <(awk -v block_begin="# >>> $MARKER" -v block_end="# <<< $MARKER" '
-      index($0, block_begin) == 1 && !open { open = 1; from = NR; text = "" }
-      open { text = text $0 "\n" }
-      open && index($0, block_end) == 1 { printf "%d-%d\035%s\034", from, NR, text; open = 0 }
-      END { if (open) printf "%d-%d\035%s\034", from, NR, text }
+    done < <(awk -v marker="$MARKER" "$AWK_BLOCK"'
+      block_step($0) {
+        if (blk_first) { from = NR; text = "" }
+        text = text $0 "\n"
+        if (blk_last) printf "%d-%d\035%s\034", from, NR, text
+      }
+      END { if (blk_open) printf "%d-%d\035%s\034", from, NR, text }
     ' "$HOME/.zshrc")
   fi
   printf 'zshrc-block: %s\nzshrc-sources-lib: %s\n' "$range" "$sources"
@@ -658,36 +773,27 @@ collect_brew() {
 # --- zshrc / zprofile ---
 
 # zsh_paragraphs <ファイル>
-# dotfiles ブロックを除き、空行で区切った段落を「開始行 \035 直前の空行 \035 本文」の形で、\034 区切りで出す。
+# dotfiles ブロック（AWK_BLOCK）を除き、空行で区切った段落を「開始行 \035 直前の空行 \035 本文」の形で、\034 区切りで出す。
 # 直前の空行（1 行ごとに改行付き）は、前の段落とつなぐときに使う。ブロックの手前とファイルの終わりには
-# 空の記録を出す（そこを越えてはつながない）。空行には BLANK_LINE_CHARS 文字未満の空白だけの行も含める
+# 空の記録を出す（そこを越えてはつながない）。ファイルの終わりでブロックが閉じていなければ、その手前に「!」の記録を出す。
+# 空行には BLANK_LINE_CHARS 文字未満の空白だけの行も含める
 # （それ以上のものは garbage として段落に残す）。コメントだけの段落も出す（つないだ段落の途中に入ることがあるため）
 zsh_paragraphs() {
-  awk -v block_begin="# >>> $MARKER" -v block_end="# <<< $MARKER" -v blank="$BLANK_LINE_CHARS" '
+  awk -v marker="$MARKER" -v blank="$BLANK_LINE_CHARS" "$AWK_BLOCK"'
     function flush() {
       if (para == "") return
       printf "%d\035%s\035%s\034", start, gap, para
       para = gap = ""
     }
     function boundary() { flush(); printf "\034"; gap = "" }
-    index($0, block_begin) == 1 { boundary(); in_block = 1 }
-    in_block { if (index($0, block_end) == 1) in_block = 0; next }
+    block_step($0) { if (blk_first) boundary(); next }
     # 空白は 1 バイトの文字なので、length で文字数を数えられる
     /^[[:space:]]*$/ && length($0) < blank { flush(); gap = gap $0 "\n"; next }
     {
       if (para == "") start = NR
       para = para (para == "" ? "" : "\n") $0
     }
-    END { boundary() }
-  ' "$1"
-}
-
-# dotfiles ブロックの終わりの行が無ければ真
-has_unclosed_block() {
-  awk -v block_begin="# >>> $MARKER" -v block_end="# <<< $MARKER" '
-    index($0, block_begin) == 1 { open = 1 }
-    index($0, block_end) == 1 { open = 0 }
-    END { exit !open }
+    END { if (blk_open) printf "!\034"; boundary() }
   ' "$1"
 }
 
@@ -695,6 +801,8 @@ has_unclosed_block() {
 # （zsh -n は、続きが無くても通す）。\ は行の最後の文字で、続く \ の数が奇数のときだけ（"\ " はエスケープした空白、
 # \\ はエスケープした \）。コメントの中の \ && || | は見ない
 ends_with_continuation() {
+  # \ & | のどれも無ければ、続きを待つ行は無い（awk を起動しない）
+  [[ "$1" == *[\\\&\|]* ]] || return 1
   printf '%s\n' "$1" | awk "$AWK_CODE"'
     { s = code($0) }
     s ~ /^[[:space:]]*$/ { next }
@@ -708,13 +816,16 @@ ends_with_continuation() {
 
 # 段落がそれだけで構文として完結しているか。zsh -n が通り、ヒアドキュメントが閉じていて、最後の行が続きを待つ
 # \ && || | で終わっていなければ真。zsh -n は閉じていないヒアドキュメントを通すので、構文の誤りになる行（")"）を
-# 後ろに足しても通るかで確かめる（閉じていなければ、足した行はヒアドキュメントの中身になる）。zsh の設定ファイルは読まない
+# 後ろに足しても通るかで確かめる（閉じていなければ、足した行はヒアドキュメントの中身になる）。zsh の設定ファイルは読まない。
+# ヒアドキュメントは << で始まるので、<< が無いか、<<< （ヒアストリング）だけなら 2 回目の zsh -n は省く
+# （zsh -n が通る内容の後ろに ")" を足せば、ヒアドキュメントが閉じていなければ必ず通らない）
 zsh_complete() {
+  local heredoc='(^|[^<])<<([^<]|$)'
   printf '%s\n' "$1" | zsh -f -n >/dev/null 2>&1 || return 1
   ends_with_continuation "$1" && return 1
-  case "$1" in
-    *"<<"*) ! printf '%s\n)\n' "$1" | zsh -f -n >/dev/null 2>&1 ;;
-  esac
+  if [[ "$1" =~ $heredoc ]]; then
+    ! printf '%s\n)\n' "$1" | zsh -f -n >/dev/null 2>&1
+  fi
 }
 
 # 段落のコードの部分（行末のコメントを除いた部分）に brew shellenv を含むか
@@ -731,13 +842,13 @@ has_shellenv() {
 # secret が立つものは、秘密情報を除外リストに書き写さないよう id を sha256:<SHA-256> にし、
 # 本文の秘密と判定した値を *** に置き換える（id とフラグは置き換える前の内容で決める）
 zsh_item() {
-  local lines key flags body="$3"
-  lines="$(printf '%s\n' "$3" | noncomment_lines)"
-  [ -n "$lines" ] || return 0
-  key="${lines//$'\n'/ ⏎ }"
-  content_flags "$3"
+  local key flags body="$3"
+  noncomment_lines "$3"
+  [ -n "$NONCOMMENT" ] || return 0
+  key="${NONCOMMENT//$'\n'/ ⏎ }"
+  content_flags text "$3"
   flags="$FLAGS"
-  in_dotfiles "$lines" && flags="$flags,in-dotfiles"
+  in_dotfiles "$NONCOMMENT" && flags="$flags,in-dotfiles"
   if has_flag "$flags" secret; then
     key="sha256:$(printf '%s' "$key" | shasum -a 256 | cut -d ' ' -f 1)"
     body="$MASKED"
@@ -771,14 +882,16 @@ zsh_unit() {
 collect_zsh() {
   local kind="$1" file="$2" check=1 rec line gap para text="" start=""
   [ -f "$file" ] || return 0
-  if has_unclosed_block "$file"; then
-    add_warning "~/.$kind の dotfiles ブロックが閉じていないため、ブロックの開始行より後ろを確認していません"
-  fi
-  if ! command -v zsh >/dev/null 2>&1; then
+  if [ "$ZSH_AVAILABLE" -eq 0 ]; then
     check=0
     add_warning "zsh が見つからないため、~/.$kind の段落が構文として完結しているかを確かめていません（if や関数の中の空行で、項目が途中で分かれていることがあります）"
   fi
   while IFS= read -r -d $'\034' rec; do
+    # dotfiles ブロックが閉じていない（zsh_paragraphs が、ファイルの終わりの記録の手前に出す）
+    if [ "$rec" = "!" ]; then
+      add_warning "~/.$kind の dotfiles ブロックが閉じていないため、ブロックの開始行より後ろを確認していません"
+      continue
+    fi
     # ブロックの手前かファイルの終わり。つないでいる途中なら、そこまでを 1 項目にする
     if [ -z "$rec" ]; then
       if [ -n "$text" ]; then
@@ -907,68 +1020,98 @@ plist_summary() {
   '
 }
 
-# 標準入力の plist の変更（plist_changes の形）から、フラグの判定に使う変更後の値を出す。
-# data は除く。文字列は "" を外し、\n と \t を改行とタブに戻す
-plist_added_values() {
-  awk -F '\t' '
-    $3 == "" || $3 ~ /^data:/ { next }
-    {
-      v = $3
-      if (v ~ /^".*"$/) v = substr(v, 2, length(v) - 2)
-      gsub(/\\n/, "\n", v); gsub(/\\t/, "\t", v)
-      print v
-    }
-  '
+# base64_decode: 標準入力の base64 を戻して標準出力に出す
+base64_decode() {
+  if [ -z "$BASE64_DECODE" ]; then
+    if [ "$(printf 'QQ==' | base64 -D 2>/dev/null)" = A ]; then BASE64_DECODE=-D; else BASE64_DECODE=-d; fi
+  fi
+  base64 "$BASE64_DECODE" 2>/dev/null
 }
 
-# git diff のうち、足された行だけを出す
-added_lines() {
-  awk '/^@@/ { hunk = 1; next } hunk && /^\+/ { print substr($0, 2) }'
+# plist_check_data <plist の変更（plist_changes の形）>: data: の値を base64 から戻して、見えるまま（印字できる文字の
+# 連なり）を secret の条件で調べる（変更後の値だけがフラグの対象。前の値も表示のために置き換える）。結果は
+# PLIST_CHANGES（秘密と判定した data の値を data:*** にした変更）、FORCE_SECRET、FORCE_UNSCANNED に入れる。
+# base64 として読めない値は調べられないので unscanned にする。戻したものを調べられた値には unscanned を付けない
+plist_check_data() {
+  local line key before after col value text out="" secret=0 unscanned=0
+  PLIST_CHANGES="$1"
+  case "$1" in
+    *$'\t'data:*) ;;
+    *) return 0 ;;
+  esac
+  while IFS= read -r line; do
+    # 値が空のとき（追加と削除）にタブが詰められないよう、タブを区切りでない文字に置き換えて分ける
+    IFS=$'\035' read -r key before after <<<"${line//$'\t'/$'\035'}"
+    for col in before after; do
+      value="${!col}"
+      [[ "$value" == data:?* ]] || continue
+      if [[ "${value#data:}" =~ ^[A-Za-z0-9+/]+=*$ ]]; then
+        text="$(printf '%s' "${value#data:}" | base64_decode | tr -c '[:print:]\n' '\n')"
+        content_flags text "$text"
+        if has_flag "$FLAGS" secret; then
+          printf -v "$col" '%s' 'data:***'
+          [ "$col" = after ] && secret=1
+        fi
+      elif [ "$col" = after ]; then
+        unscanned=1
+      fi
+    done
+    out="$out$key"$'\t'"$before"$'\t'"$after"$'\n'
+  done <<<"$1"
+  PLIST_CHANGES="${out%$'\n'}"
+  FORCE_SECRET="$secret" FORCE_UNSCANNED="$unscanned"
 }
 
-# lib_item <"XY パス">: lib/ の変更 1 件を要約して出す。フラグは足された内容で判定し（secret だけは本文に出す
-# すべての行で判定する。誤って commit した秘密を消す変更でも、平文で出さないため）、
-# secret が立つものは本文の秘密と判定した値を *** に置き換える
-lib_item() {
-  local status="${1:0:2}" path="${1:3}" file body flags="" diff changes content
+# lib_summary <"XY パス">: lib/ の変更 1 件の本文を BODY に、フラグを FLAGS に入れる。
+# フラグは足された内容（diff の + 行、未追跡のファイル全体、plist の変更後の値）だけで、全文について判定する
+# （表示のために切る前の内容。201 行目より後の秘密情報も見る）。秘密と判定した値の置き換えは、本文のすべての行
+# （消された行と前後の文脈の行、plist の変更前の値も）に行い、表示のために切るのは置き換えた後にする。
+# 中身を調べられなかったもの（バイナリ。plist の data: で base64 から戻せないもの）には unscanned を付ける
+lib_summary() {
+  local status="${1:0:2}" path="${1:3}" file diff changes content
   file="$REPO_ROOT/$path"
+  BODY="" FLAGS=""
   if [ "$status" = "??" ]; then
-    body="(未追跡のファイル)"
+    BODY="(未追跡のファイル)"
     if [ -L "$file" ]; then
-      body="$body"$'\n'"(シンボリックリンク: $(readlink "$file"))"
+      BODY="$BODY"$'\n'"(シンボリックリンク: $(readlink "$file"))"
     elif [ ! -s "$file" ]; then
-      body="$body"$'\n'"(空のファイル)"
+      BODY="$BODY"$'\n'"(空のファイル)"
     elif ! grep -qI '' "$file"; then
-      body="$body"$'\n'"(バイナリファイル)"
+      BODY="$BODY"$'\n'"(バイナリファイル)"
+      FLAGS=",unscanned"
     else
       # 1 回だけ読む。末尾の空行も残す（head_lines が数える行数を変えないため）
       content="$(cat "$file"; echo /)"
       content="${content%/}"
-      content_flags "${content%$'\n'}"
-      flags="$FLAGS"
-      has_flag "$flags" secret && content="$MASKED"$'\n'
-      body="$body"$'\n'"$(printf '%s' "$content" | head_lines)"
+      content_flags text "${content%$'\n'}"
+      BODY="$BODY"$'\n'"$(printf '%s\n' "$MASKED" | head_lines)"
     fi
   elif [ "${path%.plist}" != "$path" ] && changes="$(plist_changes "$path")"; then
     # 本文とフラグは、plist を 1 回だけ読んだ結果から作る（間に iTerm2 が保存しても食い違わないように）
-    content_flags "$(printf '%s\n' "$changes" | plist_added_values)" plist "$changes"
-    flags="$FLAGS"
     if [ -z "$changes" ]; then
-      body="(キーと値は HEAD と同じです。書式だけが変わっています)"
+      BODY="(キーと値は HEAD と同じです。書式だけが変わっています)"
     else
-      has_flag "$flags" secret && changes="$MASKED"
-      body="$(printf '%s\n' "$changes" | plist_summary | head_lines)"
+      plist_check_data "$changes"
+      content_flags plist "$PLIST_CHANGES"
+      BODY="$(printf '%s\n' "$MASKED" | plist_summary | head_lines)"
     fi
   else
     # plist 以外と、plist として読めないもの（削除や新規の追加）は git diff で出す
     diff="$(repo_git diff --no-color --no-ext-diff HEAD -- "$path")"
-    body="$(printf '%s\n' "$diff" | head_lines)"
-    content_flags "$(printf '%s\n' "$diff" | added_lines)" diff "$body"
-    flags="$FLAGS"
-    has_flag "$flags" secret && body="$MASKED"
-    [ -n "$diff" ] || body="(HEAD との差分はありません)"
+    if [ -z "$diff" ]; then
+      BODY="(HEAD との差分はありません)"
+    else
+      content_flags diff "$diff"
+      BODY="$(printf '%s\n' "$MASKED" | head_lines)"
+    fi
   fi
-  emit_item lib "$path" changed "$flags" "$body"
+}
+
+# lib_item <"XY パス">: lib/ の変更 1 件を要約して出す
+lib_item() {
+  lib_summary "$1"
+  emit_item lib "${1:3}" changed "$FLAGS" "$BODY"
 }
 
 collect_lib() {
@@ -986,12 +1129,137 @@ print_footer() {
   printf '=== summary\nitems: %d\nignored: %d\n' "$ITEMS" "$IGNORED"
 }
 
-for arg in "$@"; do
-  case "$arg" in
-    --no-fetch) NO_FETCH=1 ;;
-    *) fatal "不明な引数です: $arg（使い方: collect [--no-fetch]）" ;;
-  esac
-done
+# --- サブモード（読み取り専用。結果は標準出力だけに出す） ---
+
+usage() {
+  fatal "使い方: collect [--no-fetch] | --body <出力ファイル> <kind> <lines> | --in-worktree <出力ファイル> <kind> <lines> | --check <出力ファイル> <kind> <ファイル> <lines>... | --between <ファイル> <from> <to|end> [skip...] | --without <ファイル> <lines>... | --diff <パス>..."
+}
+
+# valid_range <範囲>: 開始行-終了行（1 から数える）の形か
+valid_range() {
+  [[ "$1" =~ ^[0-9]+-[0-9]+$ ]] && [ "${1%-*}" -ge 1 ] && [ "${1%-*}" -le "${1#*-}" ]
+}
+
+# item_body <出力ファイル> <kind> <lines>: 保存した collect の出力から、kind と lines が合う項目の body を、先頭の
+# 4 スペースを外して出す。見つからなければ終了コード 1
+item_body() {
+  awk -v kind="$2" -v lines="$3" '
+    /^=== / { item = ($0 == "=== item"); k = l = ""; body = 0; next }
+    item && body && k == kind && l == lines { print substr($0, 5); found = 1 }
+    item && !body && /^kind: / { k = substr($0, 7) }
+    item && !body && /^lines: / { l = substr($0, 8) }
+    item && $0 == "body:" { body = 1; if (k == kind && l == lines) found = 1 }
+    END { exit !found }
+  ' "$1"
+}
+
+# --body <出力ファイル> <kind> <lines>
+mode_body() {
+  if [ "$#" -ne 3 ] || [ ! -f "$1" ] || ! valid_range "$3"; then usage; fi
+  item_body "$@" || fatal "kind と lines が合う項目がありません: $2 $3"
+}
+
+# --in-worktree <出力ファイル> <kind> <lines>: 段落のコメントでない行の並びが、作業ツリーの lib/zshrc のトップレベルに
+# 同じ順で連続して現れるか（in_dotfiles と同じ比べ方。HEAD の代わりに作業ツリー）。yes か no を出す
+mode_in_worktree() {
+  local body
+  if [ "$#" -ne 3 ] || [ ! -f "$1" ] || ! valid_range "$3"; then usage; fi
+  body="$(item_body "$@")" || fatal "kind と lines が合う項目がありません: $2 $3"
+  noncomment_lines "$body"
+  if [ -n "$NONCOMMENT" ] && [ -f "$REPO_ROOT/lib/zshrc" ] && top_level_match "$(cat "$REPO_ROOT/lib/zshrc")" "$NONCOMMENT"; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
+# --check <出力ファイル> <kind> <ファイル> <lines>...: ファイルの各範囲の内容が、出力の body と一致するかを、
+# 範囲ごとに「<lines>: 一致」「<lines>: 不一致」で出す（中身は出さない）。1 つでも一致しなければ終了コード 1
+mode_check() {
+  local out="$1" kind="$2" file="$3" range rc=0
+  if [ "$#" -lt 4 ] || [ ! -f "$out" ] || [ ! -f "$file" ]; then usage; fi
+  shift 3
+  for range in "$@"; do
+    valid_range "$range" || usage
+    if cmp -s <(item_body "$out" "$kind" "$range") <(awk -v s="${range%-*}" -v e="${range#*-}" 'NR >= s && NR <= e' "$file"); then
+      echo "$range: 一致"
+    else
+      echo "$range: 不一致"
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+# --between <ファイル> <from> <to|end> [skip...]: ファイルの from 行目から to 行目（end なら最後）までのうち、skip（開始行-終了行を
+# 空白区切りで並べたもの）に入らないコードの行（空行と # で始まる行のほかの行）の行番号を出す（中身は出さない）
+mode_between() {
+  local file="$1" from="$2" to="$3" range
+  if [ "$#" -lt 3 ] || [ ! -f "$file" ] || ! [[ "$from" =~ ^[0-9]+$ ]] || ! [[ "$to" =~ ^([0-9]+|end)$ ]]; then usage; fi
+  shift 3
+  for range in "$@"; do
+    valid_range "$range" || usage
+  done
+  [ "$to" = end ] && to=""
+  awk -v from="$from" -v to="$to" -v skip="$*" '
+    BEGIN { n = split(skip, r, " "); for (i = 1; i <= n; i++) { split(r[i], se, "-"); s[i] = se[1]; e[i] = se[2] } }
+    FNR < from || (to != "" && FNR > to) { next }
+    { for (i = 1; i <= n; i++) if (FNR >= s[i] && FNR <= e[i]) next }
+    !/^[[:space:]]*(#|$)/ { print FNR }
+  ' "$file"
+}
+
+# --without <ファイル> <lines>...: ファイルから各範囲の行を除いた内容を標準出力に出す。内容を画面に出さないよう、
+# 端末には出さない（リダイレクトして使う）。範囲は重ならない順不同でよい（まとめて除くので、行番号がずれない）
+mode_without() {
+  local file="$1" range
+  if [ "$#" -lt 2 ] || [ ! -f "$file" ]; then usage; fi
+  shift
+  for range in "$@"; do
+    valid_range "$range" || usage
+  done
+  [ ! -t 1 ] || fatal "--without は内容を端末に出さないため、ファイルにリダイレクトしてください（collect --without <ファイル> <lines>... > <一時ファイル>）"
+  awk -v ranges="$*" '
+    BEGIN { n = split(ranges, r, " "); for (i = 1; i <= n; i++) { split(r[i], se, "-"); s[i] = se[1]; e[i] = se[2] } }
+    { for (i = 1; i <= n; i++) if (FNR >= s[i] && FNR <= e[i]) next }
+    { print }
+  ' "$file"
+}
+
+# --diff <パス>...: lib/ のファイルの HEAD との差分を、秘密と判定した値を *** に置き換えて出す（SKILL.md が commit 前に見せる差分。
+# 生の git diff には、消された行や文脈の行に秘密が出うる）。plist は変更の要約。行数は切らない
+mode_diff() {
+  local path entry flags
+  if [ "$#" -lt 1 ]; then usage; fi
+  MAX_LINES=1000000
+  for path in "$@"; do
+    case "$path" in
+      lib/*) ;;
+      *) fatal "lib/ の下のパスだけ指定できます: $path" ;;
+    esac
+    entry="$(repo_git status --porcelain --no-renames --untracked-files=all -- "$path" | head -n 1)"
+    [ -n "$entry" ] || { printf '=== %s\n(HEAD との差分はありません)\n' "$path"; continue; }
+    lib_summary "$entry"
+    flags="${FLAGS#,}"
+    printf '=== %s\nflags: %s\n%s\n' "$path" "${flags:--}" "$BODY"
+  done
+}
+
+MODE=collect
+case "${1:-}" in
+  --body | --in-worktree | --check | --between | --without | --diff)
+    MODE="${1#--}"
+    shift
+    ;;
+  *)
+    for arg in "$@"; do
+      case "$arg" in
+        --no-fetch) NO_FETCH=1 ;;
+        *) fatal "不明な引数です: $arg（使い方: collect [--no-fetch]、サブモードは先頭に 1 つだけ指定）" ;;
+      esac
+    done
+    ;;
+esac
 
 command -v git >/dev/null 2>&1 || fatal "git が見つかりません"
 if [ -f "$COMMON_SH" ]; then
@@ -1003,20 +1271,32 @@ if [ -z "${REPO_ROOT:-}" ] || [ ! -d "$LIB_DIR" ] ||
   [ "$(repo_git rev-parse --show-toplevel 2>/dev/null)" != "$REPO_ROOT" ]; then
   fatal "dotfiles リポジトリが見つかりません（collect は .claude/skills/sync-to-dotfiles/scripts/ に置きます）"
 fi
-# dotfiles 側は HEAD の内容と比べる（作業ツリーの未コミットの変更は lib の項目として別に出る）
-HEAD_BREWFILE="$(repo_git show HEAD:lib/Brewfile 2>/dev/null)"
-HEAD_ZSHRC="$(repo_git show HEAD:lib/zshrc 2>/dev/null)"
-HEAD_ZSHRC_LINES=$'\n'"$(printf '%s\n' "$HEAD_ZSHRC" | noncomment_lines)"$'\n'
+command -v zsh >/dev/null 2>&1 && ZSH_AVAILABLE=1
 ROOT_DIRS=$'\n'
 for dir in /* /.[!.]*; do
   [ -d "$dir" ] && ROOT_DIRS="$ROOT_DIRS$dir"$'\n'
 done
 
-read_ignore_list
-read_status
-print_repo
-collect_brew
-collect_zsh zshrc "$HOME/.zshrc"
-collect_zsh zprofile "$HOME/.zprofile" shellenv
-collect_lib
-print_footer
+case "$MODE" in
+  body) mode_body "$@" ;;
+  in-worktree) mode_in_worktree "$@" ;;
+  check) mode_check "$@" ;;
+  between) mode_between "$@" ;;
+  without) mode_without "$@" ;;
+  diff) mode_diff "$@" ;;
+  *)
+    # dotfiles 側は HEAD の内容と比べる（作業ツリーの未コミットの変更は lib の項目として別に出る）
+    HEAD_BREWFILE="$(repo_git show HEAD:lib/Brewfile 2>/dev/null)"
+    HEAD_ZSHRC="$(repo_git show HEAD:lib/zshrc 2>/dev/null)"
+    noncomment_lines "$HEAD_ZSHRC"
+    HEAD_ZSHRC_LINES=$'\n'"$NONCOMMENT"$'\n'
+    read_ignore_list
+    read_status
+    print_repo
+    collect_brew
+    collect_zsh zshrc "$HOME/.zshrc"
+    collect_zsh zprofile "$HOME/.zprofile" shellenv
+    collect_lib
+    print_footer
+    ;;
+esac
