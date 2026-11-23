@@ -476,6 +476,31 @@ record_cli_unused() {
   CLI_STATUS_TMP=""
 }
 
+sync_vendored_skills() {
+  local skill source destination
+  for skill in grilling grill-with-docs domain-modeling; do
+    source="$REPO_ROOT/docs/skills/$skill"
+    destination="$REPO_ROOT/lib/agents/nozimin/skills/$skill"
+    if [ ! -d "$source" ] || [ -L "$source" ] || [ -n "$(find "$source" -type l -print -quit)" ]; then
+      error "管理対象の vendored skill が見つからないか、通常ディレクトリではありません: $source"
+      return 1
+    fi
+    if [ -L "$destination" ] ||
+      { [ -d "$destination" ] && [ -n "$(find "$destination" -type l -print -quit)" ]; }; then
+      error "plugin の skill 配布先に symbolic link があるため安全に同期できません: $destination"
+      return 1
+    fi
+    mkdir -p "$destination" || {
+      error "plugin の skill 配布先を作成できませんでした: $destination"
+      return 1
+    }
+    cp -R "$source/." "$destination/" || {
+      error "vendored skill を plugin の配布先へ同期できませんでした: $skill"
+      return 1
+    }
+  done
+}
+
 check_missing_cli_migrations() {
   local cli pointer path repo_path
   repo_path=""
@@ -627,6 +652,7 @@ preflight_claude || exit 1
 preflight_codex || exit 1
 check_missing_cli_migrations || exit 1
 validate_managed_config_roots || exit 1
+sync_vendored_skills || exit 1
 
 REPO_POINTER_VALUE=""
 [ ! -f "$REPO_POINTER" ] || REPO_POINTER_VALUE="$(skills_repo_pointer_value "$REPO_POINTER")" || exit 1
