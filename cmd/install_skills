@@ -477,7 +477,17 @@ record_cli_unused() {
 }
 
 sync_vendored_skills() {
-  local skill source destination
+  local skill source destination plugin_license
+  plugin_license="$REPO_ROOT/lib/agents/nozimin/LICENSE.mattpocock"
+  if [ ! -f "$REPO_ROOT/docs/skills/LICENSE.mattpocock" ] ||
+    [ -L "$REPO_ROOT/docs/skills/LICENSE.mattpocock" ] || [ -L "$plugin_license" ]; then
+    error "MIT license の配布元または配布先が通常ファイルではありません"
+    return 1
+  fi
+  cp "$REPO_ROOT/docs/skills/LICENSE.mattpocock" "$plugin_license" || {
+    error "MIT license notice を plugin に同期できませんでした"
+    return 1
+  }
   for skill in grilling grill-with-docs domain-modeling; do
     source="$REPO_ROOT/docs/skills/$skill"
     destination="$REPO_ROOT/lib/agents/nozimin/skills/$skill"
@@ -494,7 +504,7 @@ sync_vendored_skills() {
       error "plugin の skill 配布先を作成できませんでした: $destination"
       return 1
     }
-    cp -R "$source/." "$destination/" || {
+    rsync -a --delete "$source/" "$destination/" || {
       error "vendored skill を plugin の配布先へ同期できませんでした: $skill"
       return 1
     }
