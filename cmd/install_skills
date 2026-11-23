@@ -480,7 +480,9 @@ sync_vendored_skills() {
   local skill source destination plugin_license
   plugin_license="$REPO_ROOT/lib/agents/nozimin/LICENSE.mattpocock"
   if [ ! -f "$REPO_ROOT/docs/skills/LICENSE.mattpocock" ] ||
-    [ -L "$REPO_ROOT/docs/skills/LICENSE.mattpocock" ] || [ -L "$plugin_license" ]; then
+    [ -L "$REPO_ROOT/docs/skills/LICENSE.mattpocock" ] ||
+    { { [ -e "$plugin_license" ] || [ -L "$plugin_license" ]; } &&
+      { [ -L "$plugin_license" ] || [ ! -f "$plugin_license" ]; }; }; then
     error "MIT license の配布元または配布先が通常ファイルではありません"
     return 1
   fi
