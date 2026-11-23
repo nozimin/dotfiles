@@ -500,19 +500,19 @@ path_has_symlink_parent() {
 warn_vendored_drift() {
   local source="$1" destination="$2" path relative target
   if [ -L "$source" ] || [ ! -d "$source" ]; then
-    warn "vendored skill の配布元が通常ディレクトリではありません: $source"
+    warn "同梱スキルの管理元が通常のディレクトリではありません: $source"
     return 0
   fi
   if [ -L "$destination" ]; then
-    warn "vendored skill の配布先が symbolic link です: $destination（source: ${source}）"
+    warn "同梱スキルの配布先がシンボリックリンクです: $destination（管理元: ${source}）"
     return 0
   fi
   if [ ! -e "$destination" ]; then
-    warn "vendored skill の配布先がありません: ${destination}（source: ${source}）"
+    warn "同梱スキルの配布先がありません: ${destination}（管理元: ${source}）"
     return 0
   fi
   if [ ! -d "$destination" ]; then
-    warn "vendored skill の配布先の種類が異なります: ${destination}（source directory: ${source}）"
+    warn "同梱スキルの配布先が通常のディレクトリではありません: ${destination}（管理元: ${source}）"
     return 0
   fi
 
@@ -520,27 +520,27 @@ warn_vendored_drift() {
     relative="${path#"$source"/}"
     target="$destination/$relative"
     if path_has_symlink_parent "$destination" "$relative"; then
-      warn "vendored skill の配布先に symbolic link の親があります: ${target}（source: ${path}）"
+      warn "同梱スキルの配布先の親にシンボリックリンクがあります: ${target}（管理元: ${path}）"
       continue
     fi
     if [ -L "$path" ] || [ -L "$target" ]; then
-      warn "vendored skill のパスが symbolic link です: ${target}（source: ${path}）"
+      warn "同梱スキルのパスがシンボリックリンクです: ${target}（管理元: ${path}）"
     elif [ -d "$path" ]; then
       if [ ! -e "$target" ]; then
-        warn "vendored skill の配布先にディレクトリがありません: ${target}（source: ${path}）"
+        warn "同梱スキルの配布先にディレクトリがありません: ${target}（管理元: ${path}）"
       elif [ ! -d "$target" ]; then
-        warn "vendored skill のパス種別が異なります: ${target}（source directory: ${path}）"
+        warn "同梱スキルのパス種別が異なります: ${target}（管理元はディレクトリ: ${path}）"
       fi
       continue
     fi
     if [ ! -e "$target" ]; then
-      warn "vendored skill の配布先にありません: ${target}（source: ${path}）"
+      warn "同梱スキルの配布先にありません: ${target}（管理元: ${path}）"
     elif [ -d "$target" ] && [ ! -L "$target" ]; then
-      warn "vendored skill のパス種別が異なります: ${target}（source file: ${path}）"
+      warn "同梱スキルのパス種別が異なります: ${target}（管理元は通常ファイル: ${path}）"
     elif [ ! -f "$path" ] || [ ! -f "$target" ]; then
-      warn "vendored skill のパス種別が通常ファイルではありません: ${target}（source: ${path}）"
+      warn "同梱スキルのパスが通常ファイルではありません: ${target}（管理元: ${path}）"
     elif ! vendored_file_matches_source "$path" "$target"; then
-      warn "vendored skill の内容または実行属性が異なります: ${target}（source: ${path}）"
+      warn "同梱スキルの内容または実行属性が異なります: ${target}（管理元: ${path}）"
     fi
   done < <(find "$source" -mindepth 1 -print0)
 
@@ -548,15 +548,15 @@ warn_vendored_drift() {
     relative="${path#"$destination"/}"
     target="$source/$relative"
     if path_has_symlink_parent "$source" "$relative"; then
-      warn "vendored skill の配布元に symbolic link の親があります: ${target}（package: ${path}）"
+      warn "同梱スキルの管理元の親にシンボリックリンクがあります: ${target}（配布コピー: ${path}）"
       continue
     fi
     if [ -L "$path" ] || [ -L "$target" ]; then
-      warn "vendored skill のパスが symbolic link です: ${path}（source: ${target}）"
+      warn "同梱スキルのパスがシンボリックリンクです: ${path}（管理元: ${target}）"
       continue
     fi
     if [ ! -e "$target" ] && [ ! -L "$target" ]; then
-      warn "vendored skill の配布元にありません: ${target}（package: ${path}）"
+      warn "同梱スキルの管理元にありません: ${target}（配布コピー: ${path}）"
     fi
   done < <(find "$destination" -mindepth 1 -print0)
 }
@@ -566,11 +566,11 @@ check_vendored_drift() {
   source_license="$REPO_ROOT/docs/skills/LICENSE.mattpocock"
   package_license="$REPO_ROOT/lib/agents/nozimin/LICENSE.mattpocock"
   if [ -L "$source_license" ] || [ ! -f "$source_license" ]; then
-    warn "vendored MIT license の配布元が通常ファイルではありません: $source_license"
+    warn "MIT ライセンス表示の管理元が通常ファイルではありません: $source_license"
   elif [ -L "$package_license" ] || [ ! -f "$package_license" ]; then
-    warn "vendored MIT license の配布先が通常ファイルではありません: ${package_license}（source: ${source_license}）"
+    warn "MIT ライセンス表示の配布先が通常ファイルではありません: ${package_license}（管理元: ${source_license}）"
   elif ! vendored_file_matches_source "$source_license" "$package_license"; then
-    warn "vendored MIT license の内容または実行属性が異なります: ${package_license}（source: ${source_license}）"
+    warn "MIT ライセンス表示の内容または実行属性が異なります: ${package_license}（管理元: ${source_license}）"
   fi
   for skill in grilling grill-with-docs domain-modeling; do
     source="$REPO_ROOT/docs/skills/$skill"

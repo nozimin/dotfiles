@@ -4,6 +4,6 @@ description: A relentless interview to sharpen a plan or design, which also crea
 disable-model-invocation: true
 ---
 
-Before the interview starts, load both skills in the current conversation. In Claude Code, call the Skill tool for "nozimin:grilling" and "nozimin:domain-modeling". In Codex, read and follow the sibling files `../grilling/SKILL.md` and `../domain-modeling/SKILL.md`.
+インタビューを始める前に、現在の会話で両方のスキルを読み込む。Claude Code では Skill ツールで「nozimin:grilling」と「nozimin:domain-modeling」を呼び出す。Codex では同階層の `../grilling/SKILL.md` と `../domain-modeling/SKILL.md` を読み、その指示に従う。
 
-Keep both skills active throughout the same conversation. Use `grilling` to map the design tree and ask each round's frontier questions. After each user response, apply `domain-modeling` to the terms and decisions that have just crystallised: challenge conflicting vocabulary, check relevant files or code, and update `GLOSSARY.md` inline as soon as a term is resolved. Offer an ADR at that point only when the decision is hard to reverse, surprising without context, and the result of a real trade-off; if the user accepts, record it then. Continue the grilling rounds with this updated context. These inline documentation updates are part of this skill; do not implement the design unless the user separately asks for implementation.
+同じ会話の間、両方のスキルを有効に保つ。`grilling` を使って設計の分岐を整理し、各ラウンドで現時点で答えられる質問を尋ねる。ユーザーの回答ごとに `domain-modeling` を適用し、その場で確定した用語や判断を扱う。用語の食い違いを指摘し、関係するファイルやコードを確認し、用語が確定した時点で `GLOSSARY.md` を更新する。判断を後から変えるコストが高く、背景なしでは意外で、実際のトレードオフから選ばれた場合に限り、その場で ADR を提案する。ユーザーが承諾したら記録する。更新した文脈を踏まえて grilling のラウンドを続ける。対話中の文書更新もこのスキルの作業に含む。ユーザーが別途依頼しない限り、設計の実装には進まない。

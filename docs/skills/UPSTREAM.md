@@ -1,17 +1,17 @@
-# Vendored skills attribution
+# 同梱スキルの出典
 
-These files are vendored from [mattpocock/skills](https://github.com/mattpocock/skills) at commit [abeeaf95660ba9e8b7c753eb38f441ca707a8823](https://github.com/mattpocock/skills/commit/abeeaf95660ba9e8b7c753eb38f441ca707a8823).
+以下のファイルは、[mattpocock/skills](https://github.com/mattpocock/skills) のコミット [abeeaf95660ba9e8b7c753eb38f441ca707a8823](https://github.com/mattpocock/skills/commit/abeeaf95660ba9e8b7c753eb38f441ca707a8823) から同梱しています。
 
-- `grilling/SKILL.md`: [upstream source](https://github.com/mattpocock/skills/blob/abeeaf95660ba9e8b7c753eb38f441ca707a8823/skills/productivity/grilling/SKILL.md)
-- `grill-with-docs/SKILL.md`: [upstream source](https://github.com/mattpocock/skills/blob/abeeaf95660ba9e8b7c753eb38f441ca707a8823/skills/engineering/grill-with-docs/SKILL.md)
-- `domain-modeling/SKILL.md` and its two format references: dependency required by `grill-with-docs`.
+- `grilling/SKILL.md`: [上流の原文](https://github.com/mattpocock/skills/blob/abeeaf95660ba9e8b7c753eb38f441ca707a8823/skills/productivity/grilling/SKILL.md)
+- `grill-with-docs/SKILL.md`: [上流の原文](https://github.com/mattpocock/skills/blob/abeeaf95660ba9e8b7c753eb38f441ca707a8823/skills/engineering/grill-with-docs/SKILL.md)
+- `domain-modeling/SKILL.md` と2つの書式リファレンス: `grill-with-docs` が必要とする依存ファイル。
 
-The vendored `grill-with-docs/SKILL.md` replaces one upstream instruction with local runtime and workflow instructions: Claude Code uses namespaced `nozimin:` skill names, while Codex reads the sibling skill files. Both skills are loaded before the interview and domain-modeling records resolved terms and eligible decisions inline after each round. Its `agents/openai.yaml` is dotfiles packaging metadata that enforces explicit invocation in Codex; it is not an upstream file.
+同梱した `grill-with-docs/SKILL.md` では、上流の手順1行をローカルの実行環境と作業手順に置き換えています。Claude Code では `nozimin:` 名前空間付きのスキル名を使い、Codex では同階層のスキルファイルを読み込みます。インタビュー前に両方のスキルを読み、各ラウンドの後に `domain-modeling` を使って確定した用語と対象となる判断を記録します。`agents/openai.yaml` は Codex で明示的な呼び出しを必須にする dotfiles のパッケージ設定で、上流のファイルではありません。
 
-Copyright (c) 2026 Matt Pocock. Licensed under the MIT License; see [LICENSE.mattpocock](LICENSE.mattpocock).
+著作権 © 2026 Matt Pocock。MIT ライセンスに基づきます。詳しくは [LICENSE.mattpocock](LICENSE.mattpocock) を参照してください。
 
-## Updating the vendored copies
+## 同梱ファイルの更新
 
-Edit the source under `docs/skills/` and manually apply the intended changes to the matching files under `lib/agents/nozimin/skills/`. Update the pinned commit and local-differences note above when changing upstream content. Keep the source and packaged MIT notices in sync by editing both copies.
+上流スキルを更新するときは、`docs/skills/` の管理元を編集し、対応する変更を `lib/agents/nozimin/skills/` にも手動で反映します。上流の内容を変更した場合は、上記の固定コミットとローカル変更の説明も更新してください。MIT ライセンス表示を変更する場合は、管理元と配布コピーの両方を更新します。
 
-`cmd/install_skills` reports path-specific warnings when the source and packaged files differ, but it does not copy, overwrite, or delete packaged files. Review the warnings and commit both trees after confirming the changes.
+`cmd/install_skills` は管理元と配布コピーの差分を対象パス付きで警告しますが、配布コピーの複製、上書き、削除は行いません。警告の内容を確認し、変更を確定したら両方のツリーをコミットしてください。
