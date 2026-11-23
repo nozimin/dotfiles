@@ -539,6 +539,28 @@ for dir in "$TMP/reports-empty" "$TMP/reports-missing"; do
     fail "latest-report: .json が無い（${dir##*/}）→ 終了コード 1 とメッセージ" "終了コード $RC" "$(cat "$ERR")"
   fi
 done
+# reports-dir: VULNCHECK_REPORTS_DIR が無ければ dotfiles のリポジトリ（~/.config/dotfiles/repo）の output/vuln-check-reports
+mkdir -p "$TMP/home/.config/dotfiles" "$TMP/repo"
+printf '%s\n' "$TMP/repo" >"$TMP/home/.config/dotfiles/repo"
+vulncheck reports-dir
+if [ "$RC" -eq 0 ] && [ "$(cat "$OUT")" = "$TMP/repo/output/vuln-check-reports" ]; then
+  pass "reports-dir: dotfiles のリポジトリの output/vuln-check-reports を出す"
+else
+  fail "reports-dir: dotfiles のリポジトリの output/vuln-check-reports を出す" "終了コード $RC" "$(cat "$OUT")"
+fi
+vulncheck VULNCHECK_REPORTS_DIR="$TMP/reports" reports-dir
+if [ "$RC" -eq 0 ] && [ "$(cat "$OUT")" = "$TMP/reports" ]; then
+  pass "reports-dir: VULNCHECK_REPORTS_DIR があればそれを出す"
+else
+  fail "reports-dir: VULNCHECK_REPORTS_DIR があればそれを出す" "終了コード $RC" "$(cat "$OUT")"
+fi
+rm -f "$TMP/home/.config/dotfiles/repo"
+vulncheck latest-report
+if [ "$RC" -eq 1 ] && grep -q "dotfiles のリポジトリが分かりません" "$ERR"; then
+  pass "latest-report: ~/.config/dotfiles/repo が無い → 終了コード 1 とメッセージ"
+else
+  fail "latest-report: ~/.config/dotfiles/repo が無い → 終了コード 1 とメッセージ" "終了コード $RC" "$(cat "$ERR")"
+fi
 # all --save を 2 回実行しても、保存先が溜まらない（前回の vulncheck-all.* を消す）
 vulncheck all --save
 first="$(cat "$OUT")"

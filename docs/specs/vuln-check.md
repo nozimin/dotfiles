@@ -93,7 +93,8 @@ lib/vuln-check.md         /vuln-check の使い方
 | `jvn [--inventory FILE]` | layer1 | JVN iPedia と JVN の RSS が持っている範囲（§6） |
 | `jpcert` | layer1 | JPCERT/CC 注意喚起の RSS が持っている範囲（§6） |
 | `compare A B` | - | バージョン比較。`A<B` なら `lt`、等しければ `eq`、`A>B` なら `gt` を出す（§7） |
-| `latest-report` | - | 最新のレポートの `.json` のパスだけを出す（名前が日時なので、名前順で最後のもの。`~/Documents/vuln-check/reports/`、`VULNCHECK_REPORTS_DIR` で差し替え）。無ければメッセージを出して終了コード 1。skill が `ls` を使わずに前回のレポートを探すため |
+| `latest-report` | - | 最新のレポートの `.json` のパスだけを出す（名前が日時なので、名前順で最後のもの。`reports-dir` の置き場所）。無ければメッセージを出して終了コード 1。skill が `ls` を使わずに前回のレポートを探すため |
+| `reports-dir` | - | レポートの置き場所を出す。dotfiles のリポジトリ（`~/.config/dotfiles/repo` の 1 行目）の `output/vuln-check-reports`。`VULNCHECK_REPORTS_DIR` があればそれ。リポジトリが分からなければメッセージを出して終了コード 1 |
 | `all [--save]` | - | `inventory` を実行し、その結果を使って他のすべてを実行し、全エンベロープを 1 つの配列で出す。`--save` を付けると、新しく作った一時ディレクトリ（`$TMPDIR/vulncheck-all.XXXXXX`）のファイルに書き、標準出力にはそのパスだけを出す（skill がシェルのリダイレクトを使わずに済むようにする）。保存先が溜まらないよう、書く前に前回までの `vulncheck-all.*` を消す |
 
 `--inventory FILE` を省略したときは、その場で `inventory` を実行する。`FILE` は `inventory` の出力（エンベロープ配列）と同じ形。
@@ -197,7 +198,7 @@ lib/vuln-check.md         /vuln-check の使い方
 - frontmatter: `disable-model-invocation: true`（Codex は `agents/openai.yaml` の `policy.allow_implicit_invocation: false`）。`allowed-tools`（Claude Code）で次を事前に許可する。
   - `jq` の実行（`all --save` の出力を読む。`jq` は組み込みの読み取り専用コマンドに入っていない）
   - `WebFetch`、`WebSearch`
-  - `~/Documents/vuln-check/` 以下の読み書き（レポートの保存と前回 JSON の読み込み）。前回のレポートを探すのは `vulncheck latest-report`（`ls` は使わない）
+  - `output/vuln-check-reports/` 以下の読み書き（レポートの保存と前回 JSON の読み込み。パターンは `//**/output/vuln-check-reports/**`）。前回のレポートを探すのは `vulncheck latest-report`（`ls` は使わない）
 - `scripts/vulncheck` は、読み込まれた `SKILL.md` の絶対パスから求めた `scripts/` の絶対パスで実行する（lib/skills.md の約束。製品固有の変数は使わない）。plugin の置き場所は Claude Code ではリポジトリ、Codex ではキャッシュで、決まったパスが無いので `allowed-tools` では許可しない（初回の実行で許可を求められる）。
 - Codex のサンドボックスがネットワークを許可していないと、インベントリ以外のソースがすべて `error` になる。そのときはネットワークを許可して実行し直すよう伝えて終える。
 - シェルのリダイレクト（`>`）で書き出さない（行き先ごとに書き込みの許可が要る）。`all` の出力は `--save` で保存する。
@@ -224,7 +225,7 @@ lib/vuln-check.md         /vuln-check の使い方
    - 対象に当たるか決めきれない候補は「個別に要確認」とし、調べた URL を根拠に書く。
 4. **クロスチェック**: 層1で該当したのに層2で検出されていないものは「層2未検出」として警告する。
 5. **トリアージ**（§9）と、放置すると何が起きるかの一文（§9.2）を付ける。
-6. **差分のタグ**: `vulncheck latest-report` が出す最新の `.json`（`~/Documents/vuln-check/reports/`）と比べ、各指摘に `[新規]` / `[継続]` を、前回あって今回ないものに `[解消]` を付ける。前回が無ければ（レポートのディレクトリが無い、または `.json` が 1 つも無い）すべて `[新規]`。
+6. **差分のタグ**: `vulncheck latest-report` が出す最新の `.json`（`reports-dir` の置き場所）と比べ、各指摘に `[新規]` / `[継続]` を、前回あって今回ないものに `[解消]` を付ける。前回が無ければ（レポートのディレクトリが無い、または `.json` が 1 つも無い）すべて `[新規]`。
    - **指摘**は「対象 × 脆弱性」の 1 組。**対象**は kind + name（例: `app Google Chrome`）。
    - 指摘の ID は次の順で決める: OSV の項目は OSV の `id`（GHSA など。CVE は後から `aliases` に増えることがあるため）。AI が見つけたものは CVE、無ければアドバイザリ ID、それも無ければ `fix:<修正版>`。EOL は `eol:<サイクルか名前>`。マルウェアは `removed:<拡張 ID>`。
    - `key` は「対象 + 指摘の ID」。`key` が違っても、同じ対象で `ids`（ID と別名の集合）が重なれば同じ指摘とみなす。
@@ -250,38 +251,49 @@ lib/vuln-check.md         /vuln-check の使い方
 
 ### 9.2 放置すると何が起きるか
 
-- 形式: 「〈きっかけ〉だけで、〈起きること〉」+ 感嘆符。
+- 形式: 「〈きっかけ〉だけで、〈起きること〉可能性があります。」。優先度によって形は変えない（優先度は色で示す）。
 - 一文は**対象ごとに 1 つ**書き、その対象の指摘で共有する（Chrome のように 1 つの対象に百件以上の指摘があるため）。内容はその対象で最も優先度の高い指摘に基づく。
-- 感嘆符の数は優先度で決める: P0 は `！！！`、P1 は `！！`、P2 は `！`。
 - アドバイザリの内容を超えて書かない。影響の種類ごとの書き方:
-  - リモートからのコード実行 →「PC を乗っ取られる」
-  - 情報漏えい →「〜が抜き取られる」
-  - 権限昇格 →「管理者権限を奪われる」
-  - DoS →「アプリを落とされる」
-  - 詳細が非公開 →「詳細は非公開。最悪の場合〜」
-- 例:「細工された Web ページを開くだけで、PC を乗っ取られる！！！」
+  - リモートからのコード実行 →「PC を乗っ取られる可能性があります。」
+  - 情報漏えい →「〜が抜き取られる可能性があります。」
+  - 権限昇格 →「管理者権限を奪われる可能性があります。」
+  - DoS →「アプリを落とされる可能性があります。」
+  - 詳細が非公開 →「詳細は非公開です。最悪の場合、〜される可能性があります。」
+- 例:「細工された Web ページを開くだけで、PC を乗っ取られる可能性があります。」
 
 ## 10. 出力
 
 ### 10.1 チャットのサマリー
 
 ```
-【P0】1件 【P1】1件 【P2】4件 ／ ⚠ソース異常 1件 ／ 要確認 1件
+🔴P0 1件 🟠P1 1件 🟡P2 4件 ／ ⚠ソース異常 1件 ／ 要確認 1件
 
-P0 [新規] Google Chrome 156.0.8078.81 → 156.0.8079.12
-  細工された Web ページを開くだけで、PC を乗っ取られる！！！
-  → Chrome を再起動して更新
-P1 [継続] activestorage 7.2.1 → 7.2.3.2, 8.0.2 → 8.0.5.1
-  細工された画像を変換させるだけで、PC を乗っ取られる！！
-  → gem update activestorage
-…（P2 は件数と対象名だけ）
+---
+🔴P0[新規] Google Chrome（CVE-2026-12345 ほか 62件）
+細工された Web ページを開くだけで、PC を乗っ取られる可能性があります。
+ソース: https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop.html
+
+現在のバージョン: 156.0.8078.81
+パッチバージョン: 156.0.8079.12 以降
+更新方法:
+（入手経路に合った手順。コマンド、アプリ内の操作、前提、確かめ方、更新後の作業）
+
+---
+🟠P1[継続] activestorage（GHSA-xr9x-r78c-5hrm ほか 3件）
+…（P0 と同じ形）
+
+---
+🟡P2 4件: ruby, rack, nokogiri, Keynote
+
 [解消] 2件 ／ ⚠ JVN iPedia: 取得失敗 ／ 要確認: Steam（バージョン不明）
 
-レポート: ~/Documents/vuln-check/reports/20261109153000.md
+レポート: ~/WorkSpace/Repositories/dotfiles/output/vuln-check-reports/20261109153000.md
 ```
 
+- 優先度は色で示す: 🔴 P0、🟠 P1、🟡 P2。
+- P0 と P1 は対象ごとに `---` で区切ったブロックにし、ID、一文、ソース（根拠にしたページの URL）、現在のバージョン、パッチバージョン、更新方法を書く。P2 は件数と対象名だけ。
 - 件数は**対象の数**（指摘の数ではない）。`[解消]` の件数も対象の数。
-- 修正版が系列ごとに違う対象は、`7.2.1 → 7.2.3.2, 8.0.2 → 8.0.5.1` のように版ごとに書く。
+- 修正版が系列ごとに違う対象は、`7.2.1 → 7.2.3.2 以降, 8.0.2 → 8.0.5.1 以降` のように版ごとに書く。
 
 見出し（1 行目）は次の 3 種類のどれか。「個別に要確認」が 1 件以上あれば、どれにも `／ 要確認 M件` を付け足す。
 
@@ -296,7 +308,7 @@ P1 [継続] activestorage 7.2.1 → 7.2.3.2, 8.0.2 → 8.0.5.1
 
 ### 10.2 レポート
 
-- 保存先: `~/Documents/vuln-check/reports/YYYYMMDDhhmmss.md` と、同じ名前の `.json`。ディレクトリが無ければ作る。古いレポートは削除しない。
+- 保存先: dotfiles のリポジトリの `output/vuln-check-reports/YYYYMMDDhhmmss.md`（`vulncheck reports-dir` が出す。リポジトリは `~/.config/dotfiles/repo` の 1 行目、`VULNCHECK_REPORTS_DIR` で差し替え。`output/` は `.gitignore` で除外） と、同じ名前の `.json`。ディレクトリが無ければ作る。古いレポートは削除しない。
 - `.md` の節:
   1. サマリー（§10.1 の見出しと件数）
   2. 指摘の一覧（優先度順）。各指摘に: 優先度、差分タグ、対象、現在のバージョン → 修正版、CVE、放置すると何が起きるかの一文、判定の根拠（KEV / CVSS / AI の判断理由）、更新コマンド

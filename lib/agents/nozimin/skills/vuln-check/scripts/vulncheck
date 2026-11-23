@@ -74,9 +74,10 @@ usage() {
   jpcert                      JPCERT/CC の RSS にある注意喚起を出す
   compare A B                 バージョンを比べて lt / eq / gt を出す
   latest-report               最新のレポートの .json のパスを出す（無ければ失敗）
+  reports-dir                 レポートの置き場所（dotfiles の output/vuln-check-reports）を出す
   all [--save]                inventory とその他すべてを実行する
 
-出力はエンベロープの JSON 配列（compare と latest-report を除く）。
+出力はエンベロープの JSON 配列（compare、latest-report、reports-dir を除く）。
 --inventory を省略すると、その場で inventory を実行する。
 all --save は、新しく作った一時ディレクトリのファイルに出力を書き、そのパスだけを出す（前回までの保存先は消す）。
 EOF
@@ -1400,9 +1401,23 @@ cmd_compare() {
   version_compare "$1" "$2"
 }
 
+# レポートの置き場所を出す。VULNCHECK_REPORTS_DIR が無ければ、dotfiles のリポジトリ（~/.config/dotfiles/repo の 1 行目）の output/vuln-check-reports
+reports_dir() {
+  local pointer="$HOME/.config/dotfiles/repo" repo=""
+  if [ -n "${VULNCHECK_REPORTS_DIR:-}" ]; then
+    echo "$VULNCHECK_REPORTS_DIR"
+    return
+  fi
+  [ -f "$pointer" ] && IFS= read -r repo <"$pointer" || true
+  [ -n "$repo" ] && [ -d "$repo" ] ||
+    die "dotfiles のリポジトリが分かりません（$pointer が無いか、中身のディレクトリがありません）。cmd/install_skills を実行するか、VULNCHECK_REPORTS_DIR を指定してください"
+  echo "$repo/output/vuln-check-reports"
+}
+
 # 最新のレポートの .json のパスを出す（名前が日時なので、名前順の最後が最新）。無ければメッセージを出して 1 を返す
 cmd_latest_report() {
-  local dir="${VULNCHECK_REPORTS_DIR:-$HOME/Documents/vuln-check/reports}" file newest=""
+  local dir file newest=""
+  dir="$(reports_dir)" || exit 1
   for file in "$dir"/*.json; do
     if [ -f "$file" ]; then
       newest="$file"
@@ -1433,6 +1448,11 @@ main() {
     latest-report)
       [ "$#" -eq 0 ] || die "latest-report は引数を取りません: $*"
       cmd_latest_report
+      return
+      ;;
+    reports-dir)
+      [ "$#" -eq 0 ] || die "reports-dir は引数を取りません: $*"
+      reports_dir
       return
       ;;
     inventory | jpcert)
