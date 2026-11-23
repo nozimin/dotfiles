@@ -93,8 +93,8 @@ lib/vuln-check.md         /vuln-check の使い方
 | `jvn [--inventory FILE]` | layer1 | JVN iPedia と JVN の RSS が持っている範囲（§6） |
 | `jpcert` | layer1 | JPCERT/CC 注意喚起の RSS が持っている範囲（§6） |
 | `compare A B` | - | バージョン比較。`A<B` なら `lt`、等しければ `eq`、`A>B` なら `gt` を出す（§7） |
-| `latest-report` | - | 最新のレポートの `.json` のパスだけを出す（名前が日時なので、名前順で最後のもの。`reports-dir` の置き場所）。無ければメッセージを出して終了コード 1。skill が `ls` を使わずに前回のレポートを探すため |
-| `reports-dir` | - | レポートの置き場所を出す。dotfiles のリポジトリ（`~/.config/dotfiles/repo` の 1 行目）の `output/vuln-check-reports`。`VULNCHECK_REPORTS_DIR` があればそれ。リポジトリが分からなければメッセージを出して終了コード 1 |
+| `latest-report` | - | 最新のレポートの `.json` のパスだけを出す（名前が日時なので、名前順で最後のもの。`reports-dir` の置き場所）。無ければメッセージを出して終了コード 1、置き場所が決まらなければ 2。skill が `ls` を使わずに前回のレポートを探すため |
+| `reports-dir` | - | レポートの置き場所を出す。dotfiles のリポジトリ（`~/.config/dotfiles/repo` の 1 行目）の `output/vuln-check-reports`。`VULNCHECK_REPORTS_DIR` があればそれ。pointer は `cmd/skills_lock.sh` / `cmd/skills_common.sh` と同じに確かめる（通常のファイルで 1 行、絶対パス、`repo.migrating` が無い）。決まらなければメッセージを出して終了コード 2（「前回のレポートが無い」の 1 と分ける）。skill は収集の前に 1 回実行し、決まらなければ調査を始めずに終える |
 | `all [--save]` | - | `inventory` を実行し、その結果を使って他のすべてを実行し、全エンベロープを 1 つの配列で出す。`--save` を付けると、新しく作った一時ディレクトリ（`$TMPDIR/vulncheck-all.XXXXXX`）のファイルに書き、標準出力にはそのパスだけを出す（skill がシェルのリダイレクトを使わずに済むようにする）。保存先が溜まらないよう、書く前に前回までの `vulncheck-all.*` を消す |
 
 `--inventory FILE` を省略したときは、その場で `inventory` を実行する。`FILE` は `inventory` の出力（エンベロープ配列）と同じ形。
@@ -198,7 +198,7 @@ lib/vuln-check.md         /vuln-check の使い方
 - frontmatter: `disable-model-invocation: true`（Codex は `agents/openai.yaml` の `policy.allow_implicit_invocation: false`）。`allowed-tools`（Claude Code）で次を事前に許可する。
   - `jq` の実行（`all --save` の出力を読む。`jq` は組み込みの読み取り専用コマンドに入っていない）
   - `WebFetch`、`WebSearch`
-  - `output/vuln-check-reports/` 以下の読み書き（レポートの保存と前回 JSON の読み込み。パターンは `//**/output/vuln-check-reports/**`）。前回のレポートを探すのは `vulncheck latest-report`（`ls` は使わない）
+  - `output/vuln-check-reports/` 以下の読み書き（レポートの保存と前回 JSON の読み込み。パターンは `//**/output/vuln-check-reports/**`）。ファイルシステムのどこにある同名のディレクトリにも当たるが、pointer の場所は実行時にしか分からないので、静的な `allowed-tools` ではこれにする。`VULNCHECK_REPORTS_DIR` で別の場所にしたときは当たらないので、書くときに許可を求められる。前回のレポートを探すのは `vulncheck latest-report`（`ls` は使わない）
 - `scripts/vulncheck` は、読み込まれた `SKILL.md` の絶対パスから求めた `scripts/` の絶対パスで実行する（lib/skills.md の約束。製品固有の変数は使わない）。plugin の置き場所は Claude Code ではリポジトリ、Codex ではキャッシュで、決まったパスが無いので `allowed-tools` では許可しない（初回の実行で許可を求められる）。
 - Codex のサンドボックスがネットワークを許可していないと、インベントリ以外のソースがすべて `error` になる。そのときはネットワークを許可して実行し直すよう伝えて終える。
 - シェルのリダイレクト（`>`）で書き出さない（行き先ごとに書き込みの許可が要る）。`all` の出力は `--save` で保存する。
@@ -287,7 +287,7 @@ lib/vuln-check.md         /vuln-check の使い方
 
 [解消] 2件 ／ ⚠ JVN iPedia: 取得失敗 ／ 要確認: Steam（バージョン不明）
 
-レポート: ~/WorkSpace/Repositories/dotfiles/output/vuln-check-reports/20261109153000.md
+レポート: <dotfiles>/output/vuln-check-reports/20261109153000.md
 ```
 
 - 優先度は色で示す: 🔴 P0、🟠 P1、🟡 P2。

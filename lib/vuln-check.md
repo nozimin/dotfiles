@@ -50,7 +50,7 @@ Claude Code で `/nozimin:vuln-check`、Codex CLI で `$nozimin:vuln-check` と�
 
 ## レポートの保存先
 
-dotfiles のリポジトリの `output/vuln-check-reports/YYYYMMDDhhmmss.md` と、同じ名前の `.json`（次回の差分の判定に使う）。リポジトリの場所は `~/.config/dotfiles/repo`（`cmd/install_skills` が作る）から読み、`vulncheck reports-dir` で確かめられる。`output/` は `.gitignore` でコミットの対象から外してある。古いレポートは削除しない。
+dotfiles のリポジトリの `output/vuln-check-reports/YYYYMMDDhhmmss.md` と、同じ名前の `.json`（次回の差分の判定に使う）。リポジトリの場所は `~/.config/dotfiles/repo`（`cmd/install_skills` が作る）から読み、`vulncheck reports-dir` で確かめられる。`output/` は `.gitignore` でコミットの対象から外してある。古いレポートは削除しない。レポートは clone の中にあるので、clone を移すか作り直すときは `output/` も移す。`git clean -fdX` / `-fdx` でも消える（前回の `.json` が無いと、次の実行ですべての指摘が `[新規]` になる）。
 
 レポートには指摘の一覧のほか、ソースごとの状態（層1は取得できた期間と最新の日付）、個別に要確認と AI 確認の一覧（調べた URL）も書く。
 

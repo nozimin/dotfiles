@@ -43,6 +43,16 @@ allowed-tools:
 
 ### 1. 収集する
 
+先にレポートの置き場所（下の `<置き場所>`）を確かめる。dotfiles のリポジトリの `output/vuln-check-reports` で、`output/` は `.gitignore` でコミットの対象から外してある。調査に時間をかけたあとで保存できないと分からないよう、最初に 1 回だけ実行し、結果を手順 7 で使う。
+
+```sh
+"$skill_scripts/vulncheck" reports-dir
+```
+
+- 終了コード 2（dotfiles のリポジトリが分かりません）なら、そのメッセージをチャットに出して終える。
+
+続けて収集する。
+
 ```sh
 "$skill_scripts/vulncheck" all --save
 ```
@@ -165,7 +175,7 @@ jq -r '.[] | select(.layer == "layer1" and .source == "kev") | [.items[] | .matc
 "$skill_scripts/vulncheck" latest-report
 ```
 
-- 「dotfiles のリポジトリが分かりません」で失敗したら、そのメッセージをチャットに出して終える（レポートの置き場所が決まらないため）。
+- 終了コードで分ける（メッセージの文言では分けない）。終了コード 2（dotfiles のリポジトリが分かりません）なら、そのメッセージをチャットに出して終える。
 - 終了コード 1（前回のレポートがありません）なら、前回は無い。すべての指摘を `[新規]` にする。
 - 前回があれば `jq` でその `findings` を読み、key で突き合わせる。今回だけにあるものは `[新規]`、両方にあるものは `[継続]`、前回だけにあるものは `[解消]`。key が違っても、同じ対象で `ids` が重なれば同じ指摘とみなす。
 
@@ -177,14 +187,8 @@ jq -r '.[] | select(.layer == "layer1" and .source == "kev") | [.items[] | .matc
    jq -r '[.[].fetched_at] | min | .[0:19] | gsub("[-T:]"; "")' <保存先>
    ```
 
-2. レポートの置き場所（下の `<置き場所>`）を求める。dotfiles のリポジトリの `output/vuln-check-reports` で、`output/` は `.gitignore` でコミットの対象から外してある。
-
-   ```sh
-   "$skill_scripts/vulncheck" reports-dir
-   ```
-
-3. `<置き場所>/<名前>.md` と `<置き場所>/<名前>.json` を書く（「出力」の節。Claude Code では Write を使い、ディレクトリが無ければ Write が作る）。前回までのレポートはそのまま残す。
-4. チャットにサマリーを出す（「出力」の節）。
+2. `<置き場所>/<名前>.md` と `<置き場所>/<名前>.json` を書く（「出力」の節。Claude Code では Write を使い、ディレクトリが無ければ Write が作る）。前回までのレポートはそのまま残す。`<置き場所>` は手順 1 の `reports-dir` の結果。
+3. チャットにサマリーを出す（「出力」の節）。
 
 ## トリアージ
 
@@ -264,7 +268,7 @@ RBENV_VERSION=3.3.5 gem cleanup activestorage
 
 [解消] 2件 ／ ⚠ jvn-ipedia（層1）: 取得失敗 ／ 要確認: Steam（バージョン不明）
 
-レポート: ~/WorkSpace/Repositories/dotfiles/output/vuln-check-reports/20261109153000.md
+レポート: <dotfiles>/output/vuln-check-reports/20261109153000.md
 ````
 
 - 優先度の色: 🔴 P0、🟠 P1、🟡 P2。見出しと各ブロックの先頭に付ける。
@@ -281,7 +285,7 @@ RBENV_VERSION=3.3.5 gem cleanup activestorage
 - P0 と P1 は対象ごとに 1 つのブロックにし、ブロックの前に `---` を置く。ブロックの中身は次の順。
   1. `<色>P<n>[タグ] <対象>（<ID> ほか N件）`。ID はその対象で最も優先度の高い指摘の ID（CVE があれば CVE、無ければ指摘の ID）。指摘が 1 件だけなら `ほか N件` を省く。
   2. 対象の一文。
-  3. `ソース: <URL>`。一文と優先度の根拠にした指摘（見出しの ID）について、実際に読んだページの URL（ベンダーのアドバイザリ、リリースノート、CVE API など）。複数あれば ` ` でつなぐ（2〜3 件まで）。OSV の項目で読んだページが無ければ `https://github.com/advisories/<GHSA の ID>`（GHSA 以外なら `https://osv.dev/vulnerability/<ID>`）。ソースが 1 つも無ければこの行を省く。
+  3. `ソース: <URL>`。一文と優先度の根拠にした指摘（見出しの ID）について、実際に読んだページの URL（ベンダーのアドバイザリ、リリースノート、CVE API など）。複数あれば `, ` でつなぐ（2〜3 件まで）。OSV の項目で読んだページが無ければ `https://github.com/advisories/<GHSA の ID>`（GHSA 以外なら `https://osv.dev/vulnerability/<ID>`）。ソースが 1 つも無ければこの行を省く。
   4. 空行のあとに `現在のバージョン: <版>` と `パッチバージョン: <修正版> 以降`。
      - 修正版は、その対象の指摘の修正版のうち最大のもの（すべてを直す版）。
      - 現在の版が複数あれば、現在のバージョンは `, ` でつなぐ。修正版が版ごとに違えば、パッチバージョンは `<版> → <修正版> 以降` を `, ` でつなぐ。
@@ -315,7 +319,7 @@ RBENV_VERSION=3.3.5 gem cleanup activestorage
 
 ## 2. 指摘の一覧
 
-### 🔴P0 [新規] Google Chrome 156.0.8078.81 → 156.0.8079.12
+### 🔴P0[新規] Google Chrome 156.0.8078.81 → 156.0.8079.12
 
 - 放置すると: 細工された Web ページを開くだけで、PC を乗っ取られる可能性があります。
 - 更新: アプリ内の更新
