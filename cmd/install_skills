@@ -476,9 +476,65 @@ record_cli_unused() {
   CLI_STATUS_TMP=""
 }
 
+validate_clean_vendored_destination() {
+  local managed_path="$1" destination="$2" path relative
+  [ -d "$destination" ] || return 0
+  if ! git -C "$REPO_ROOT" diff --quiet HEAD -- "$managed_path"; then
+    error "管理対象 skill の配布先にローカル変更があります。変更を保存または破棄してから再実行してください: $destination"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    relative="${path#"$destination"/}"
+    if ! git -C "$REPO_ROOT" ls-files --error-unmatch -- "$managed_path/$relative" >/dev/null 2>&1; then
+      error "管理対象 skill の配布先に未追跡ファイルがあります。移動または削除してから再実行してください: $path"
+      return 1
+    fi
+  done < <(find "$destination" -mindepth 1 ! -type d -print0)
+}
+
+remove_stale_vendored_files() {
+  local skill="$1" source="$REPO_ROOT/docs/skills/$1"
+  local destination="$REPO_ROOT/lib/agents/nozimin/skills/$1"
+  local managed_path="lib/agents/nozimin/skills/$1" tracked_files path relative stale parent remove_error
+  remove_error=""
+  tracked_files="$(mktemp "${TMPDIR:-/tmp}/dotfiles-vendored-files.XXXXXX")" || {
+    error "vendored skill file list の一時ファイルを作成できませんでした"
+    return 1
+  }
+  if ! git -C "$REPO_ROOT" ls-files -z -- "$managed_path" >"$tracked_files"; then
+    rm -f "$tracked_files"
+    error "管理対象 skill の追跡ファイルを確認できませんでした: $managed_path"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    relative="${path#"$managed_path"/}"
+    [ "$relative" != "$path" ] || continue
+    [ -e "$source/$relative" ] || [ -L "$source/$relative" ] || {
+      stale="$REPO_ROOT/$path"
+      if [ -e "$stale" ] || [ -L "$stale" ]; then
+        rm "$stale" || {
+          remove_error="$stale"
+          break
+        }
+        parent="$(dirname "$stale")"
+        while [ "$parent" != "$destination" ]; do
+          rmdir "$parent" 2>/dev/null || break
+          parent="$(dirname "$parent")"
+        done
+      fi
+    }
+  done <"$tracked_files"
+  rm -f "$tracked_files"
+  if [ -n "$remove_error" ]; then
+    error "古い vendored skill file を削除できませんでした: $remove_error"
+    return 1
+  fi
+}
+
 sync_vendored_skills() {
-  local skill source destination plugin_license
+  local skill source destination plugin_license license_path
   plugin_license="$REPO_ROOT/lib/agents/nozimin/LICENSE.mattpocock"
+  license_path="lib/agents/nozimin/LICENSE.mattpocock"
   if [ ! -f "$REPO_ROOT/docs/skills/LICENSE.mattpocock" ] ||
     [ -L "$REPO_ROOT/docs/skills/LICENSE.mattpocock" ] ||
     { { [ -e "$plugin_license" ] || [ -L "$plugin_license" ]; } &&
@@ -486,10 +542,16 @@ sync_vendored_skills() {
     error "MIT license の配布元または配布先が通常ファイルではありません"
     return 1
   fi
-  cp "$REPO_ROOT/docs/skills/LICENSE.mattpocock" "$plugin_license" || {
-    error "MIT license notice を plugin に同期できませんでした"
+  if { [ -e "$plugin_license" ] || [ -L "$plugin_license" ]; } &&
+    { ! git -C "$REPO_ROOT" ls-files --error-unmatch -- "$license_path" >/dev/null 2>&1 ||
+      ! git -C "$REPO_ROOT" diff --quiet HEAD -- "$license_path"; }; then
+    error "plugin の MIT license 配布先に未追跡ファイルまたはローカル変更があります: $plugin_license"
     return 1
-  }
+  fi
+  if ! git -C "$REPO_ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+    error "vendored skill を安全に同期するため Git の HEAD を確認できませんでした"
+    return 1
+  fi
   for skill in grilling grill-with-docs domain-modeling; do
     source="$REPO_ROOT/docs/skills/$skill"
     destination="$REPO_ROOT/lib/agents/nozimin/skills/$skill"
@@ -502,14 +564,25 @@ sync_vendored_skills() {
       error "plugin の skill 配布先に symbolic link があるため安全に同期できません: $destination"
       return 1
     fi
+    validate_clean_vendored_destination "lib/agents/nozimin/skills/$skill" "$destination" || return 1
+  done
+
+  cp "$REPO_ROOT/docs/skills/LICENSE.mattpocock" "$plugin_license" || {
+    error "MIT license notice を plugin に同期できませんでした"
+    return 1
+  }
+  for skill in grilling grill-with-docs domain-modeling; do
+    source="$REPO_ROOT/docs/skills/$skill"
+    destination="$REPO_ROOT/lib/agents/nozimin/skills/$skill"
     mkdir -p "$destination" || {
       error "plugin の skill 配布先を作成できませんでした: $destination"
       return 1
     }
-    rsync -a --checksum --delete "$source/" "$destination/" || {
+    rsync -a --checksum "$source/" "$destination/" || {
       error "vendored skill を plugin の配布先へ同期できませんでした: $skill"
       return 1
     }
+    remove_stale_vendored_files "$skill" || return 1
   done
 }
 
