@@ -36,6 +36,8 @@ CLI ごとに明示呼び出しの記法が異なる。
 
 `vuln-check`（[lib/vuln-check.md](vuln-check.md)）も同じで、Claude Code は `/nozimin:vuln-check`、Codex CLI は `$nozimin:vuln-check`。
 
+`review-report`（[lib/review-report.md](review-report.md)）も同じで、Claude Code は `/nozimin:review-report`、Codex CLI は `$nozimin:review-report`。
+
 Codex では `agents/openai.yaml` の `policy.allow_implicit_invocation: false` を使い、明示的に選んだときだけ skill を実行する。`SKILL.md` の `disable-model-invocation: true` は Claude Code の同じ動作のために残す。
 
 ## skill の追加
