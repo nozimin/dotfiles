@@ -53,6 +53,8 @@ Claude Code は `/reload-plugins` で反映し、Codex は `cmd/install_skills` 
 
 ## vendored skill の更新
 
-`docs/skills/` にある `grilling`、`grill-with-docs`、`domain-modeling` が配布元で、`cmd/install_skills` が内容を比較して plugin 内へ同期する。同期前に3つの配布先を検査し、未追跡ファイルや `HEAD` からのローカル変更があれば、どのファイルも変更せず停止する。必要なローカル内容を `docs/skills/` に反映するか、配布先のローカルファイルを別の場所へ退避してから再実行する。
+`docs/skills/` は vendored `grilling`、`grill-with-docs`、`domain-modeling` と MIT notice の出典記録である。`lib/agents/nozimin/` は CLI に配布する plugin である。
 
-配布元から削除された clean な追跡済みファイルだけを、対応する vendored skill の配布先から削除する。他の skill directory は走査・変更しない。上流の skill を更新するときは `docs/skills/UPSTREAM.md` の pin と差分説明を更新し、`cmd/install_skills` を再実行した後に `docs/skills/` と `lib/agents/nozimin/skills/` の差分を確認して commit する。
+上流 skill を更新するときは `docs/skills/` と対応する `lib/agents/nozimin/skills/` の両方を手動で更新し、`docs/skills/UPSTREAM.md` の pin と差分説明も直してから commit する。MIT notice の変更も両方に手動で反映する。
+
+`cmd/install_skills` はこれらの出典と配布コピーを比較する。内容、追加、削除、欠損、ファイル種別の違いを見つけると対象パスを警告するが、配布コピーは変更・削除せず、CLI の通常インストールと Codex cache の更新を続ける。警告が出たら差分を確認し、意図した変更なら両方のコピーを手動で揃える。Codex cache を更新するときは、その後に `cmd/install_skills` を再実行する。

@@ -9,3 +9,9 @@ These files are vendored from [mattpocock/skills](https://github.com/mattpocock/
 The vendored `grill-with-docs/SKILL.md` adds local runtime and workflow instructions after the upstream text: Claude Code uses namespaced `nozimin:` skill names, while Codex reads the sibling skill files. Both skills are loaded before the interview and domain-modeling records resolved terms and eligible decisions inline after each round. Its `agents/openai.yaml` is dotfiles packaging metadata that enforces explicit invocation in Codex; it is not an upstream file.
 
 Copyright (c) 2026 Matt Pocock. Licensed under the MIT License; see [LICENSE.mattpocock](LICENSE.mattpocock).
+
+## Updating the vendored copies
+
+Edit the source under `docs/skills/` and manually apply the intended changes to the matching files under `lib/agents/nozimin/skills/`. Update the pinned commit and local-differences note above when changing upstream content. Keep the source and packaged MIT notices in sync by editing both copies.
+
+`cmd/install_skills` reports path-specific warnings when the source and packaged files differ, but it does not copy, overwrite, or delete packaged files. Review the warnings and commit both trees after confirming the changes.
