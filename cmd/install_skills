@@ -504,7 +504,7 @@ sync_vendored_skills() {
       error "plugin の skill 配布先を作成できませんでした: $destination"
       return 1
     }
-    rsync -a --delete "$source/" "$destination/" || {
+    rsync -a --checksum --delete "$source/" "$destination/" || {
       error "vendored skill を plugin の配布先へ同期できませんでした: $skill"
       return 1
     }
