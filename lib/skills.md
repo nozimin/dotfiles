@@ -50,3 +50,11 @@ policy:
 Claude Code は `/reload-plugins` で反映し、Codex は `cmd/install_skills` を再実行してキャッシュを更新する。
 
 スキルにスクリプトや参照ファイルを同梱するときは、`SKILL.md` があるディレクトリからの相対パスで記述する（例: `scripts/collect`）。Claude Code の `${CLAUDE_SKILL_DIR}` のような製品固有変数は使わない。実行時は agent の skill 一覧に表示された `SKILL.md` の場所を基準に解決する。
+
+## 同梱スキルの更新
+
+`docs/skills/` は `grilling`、`grill-with-docs`、`domain-modeling` と MIT ライセンス表示の管理元・出典記録である。`lib/agents/nozimin/` は CLI に配布するプラグインである。
+
+上流スキルを更新するときは `docs/skills/` と対応する `lib/agents/nozimin/skills/` の両方を手動で更新し、`docs/skills/UPSTREAM.md` の固定コミットと差分説明も直してからコミットする。MIT ライセンス表示の変更も両方に手動で反映する。
+
+`cmd/install_skills` は管理元と配布コピーを比較する。内容、追加、削除、欠損、ファイル種別の違いを見つけると対象パスを警告するが、配布コピーは変更・削除せず、CLI の通常インストールと Codex キャッシュの更新を続ける。警告が出たら差分を確認し、意図した変更なら両方のコピーを手動で揃える。Codex キャッシュを更新するときは、その後に `cmd/install_skills` を再実行する。

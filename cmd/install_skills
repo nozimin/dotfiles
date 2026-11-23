@@ -476,6 +476,109 @@ record_cli_unused() {
   CLI_STATUS_TMP=""
 }
 
+vendored_file_matches_source() {
+  [ ! -L "$1" ] && [ ! -L "$2" ] && [ -f "$1" ] && [ -f "$2" ] || return 1
+  cmp -s "$1" "$2" || return 1
+  if [ -x "$1" ]; then
+    [ -x "$2" ]
+  else
+    [ ! -x "$2" ]
+  fi
+}
+
+path_has_symlink_parent() {
+  local relative="$2" current="$1" component
+  while [[ "$relative" == */* ]]; do
+    component="${relative%%/*}"
+    current="$current/$component"
+    [ ! -L "$current" ] || return 0
+    relative="${relative#*/}"
+  done
+  return 1
+}
+
+warn_vendored_drift() {
+  local source="$1" destination="$2" path relative target
+  if [ -L "$source" ] || [ ! -d "$source" ]; then
+    warn "同梱スキルの管理元が通常のディレクトリではありません: $source"
+    return 0
+  fi
+  if [ -L "$destination" ]; then
+    warn "同梱スキルの配布先がシンボリックリンクです: $destination（管理元: ${source}）"
+    return 0
+  fi
+  if [ ! -e "$destination" ]; then
+    warn "同梱スキルの配布先がありません: ${destination}（管理元: ${source}）"
+    return 0
+  fi
+  if [ ! -d "$destination" ]; then
+    warn "同梱スキルの配布先が通常のディレクトリではありません: ${destination}（管理元: ${source}）"
+    return 0
+  fi
+
+  while IFS= read -r -d '' path; do
+    relative="${path#"$source"/}"
+    target="$destination/$relative"
+    if path_has_symlink_parent "$destination" "$relative"; then
+      warn "同梱スキルの配布先の親にシンボリックリンクがあります: ${target}（管理元: ${path}）"
+      continue
+    fi
+    if [ -L "$path" ] || [ -L "$target" ]; then
+      warn "同梱スキルのパスがシンボリックリンクです: ${target}（管理元: ${path}）"
+    elif [ -d "$path" ]; then
+      if [ ! -e "$target" ]; then
+        warn "同梱スキルの配布先にディレクトリがありません: ${target}（管理元: ${path}）"
+      elif [ ! -d "$target" ]; then
+        warn "同梱スキルのパス種別が異なります: ${target}（管理元はディレクトリ: ${path}）"
+      fi
+      continue
+    fi
+    if [ ! -e "$target" ]; then
+      warn "同梱スキルの配布先にありません: ${target}（管理元: ${path}）"
+    elif [ -d "$target" ] && [ ! -L "$target" ]; then
+      warn "同梱スキルのパス種別が異なります: ${target}（管理元は通常ファイル: ${path}）"
+    elif [ ! -f "$path" ] || [ ! -f "$target" ]; then
+      warn "同梱スキルのパスが通常ファイルではありません: ${target}（管理元: ${path}）"
+    elif ! vendored_file_matches_source "$path" "$target"; then
+      warn "同梱スキルの内容または実行属性が異なります: ${target}（管理元: ${path}）"
+    fi
+  done < <(find "$source" -mindepth 1 -print0)
+
+  while IFS= read -r -d '' path; do
+    relative="${path#"$destination"/}"
+    target="$source/$relative"
+    if path_has_symlink_parent "$source" "$relative"; then
+      warn "同梱スキルの管理元の親にシンボリックリンクがあります: ${target}（配布コピー: ${path}）"
+      continue
+    fi
+    if [ -L "$path" ] || [ -L "$target" ]; then
+      warn "同梱スキルのパスがシンボリックリンクです: ${path}（管理元: ${target}）"
+      continue
+    fi
+    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+      warn "同梱スキルの管理元にありません: ${target}（配布コピー: ${path}）"
+    fi
+  done < <(find "$destination" -mindepth 1 -print0)
+}
+
+check_vendored_drift() {
+  local skill source destination source_license package_license
+  source_license="$REPO_ROOT/docs/skills/LICENSE.mattpocock"
+  package_license="$REPO_ROOT/lib/agents/nozimin/LICENSE.mattpocock"
+  if [ -L "$source_license" ] || [ ! -f "$source_license" ]; then
+    warn "MIT ライセンス表示の管理元が通常ファイルではありません: $source_license"
+  elif [ -L "$package_license" ] || [ ! -f "$package_license" ]; then
+    warn "MIT ライセンス表示の配布先が通常ファイルではありません: ${package_license}（管理元: ${source_license}）"
+  elif ! vendored_file_matches_source "$source_license" "$package_license"; then
+    warn "MIT ライセンス表示の内容または実行属性が異なります: ${package_license}（管理元: ${source_license}）"
+  fi
+  for skill in grilling grill-with-docs domain-modeling; do
+    source="$REPO_ROOT/docs/skills/$skill"
+    destination="$REPO_ROOT/lib/agents/nozimin/skills/$skill"
+    warn_vendored_drift "$source" "$destination"
+  done
+}
+
 check_missing_cli_migrations() {
   local cli pointer path repo_path
   repo_path=""
@@ -627,6 +730,7 @@ preflight_claude || exit 1
 preflight_codex || exit 1
 check_missing_cli_migrations || exit 1
 validate_managed_config_roots || exit 1
+check_vendored_drift
 
 REPO_POINTER_VALUE=""
 [ ! -f "$REPO_POINTER" ] || REPO_POINTER_VALUE="$(skills_repo_pointer_value "$REPO_POINTER")" || exit 1
