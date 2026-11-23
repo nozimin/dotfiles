@@ -1,0 +1,29 @@
+[
+  {"source": "brew-formula", "layer": "inventory", "status": "ok", "count": 1, "fetched_at": "2026-11-10T12:00:00+09:00",
+   "evidence": {"review": 0}, "notes": [],
+   "items": [{"kind": "brew-formula", "name": "jq", "version": "1.7.1", "origin": "homebrew/core", "bundle_id": null, "path": null, "review": null}]},
+  {"source": "brew-cask", "layer": "inventory", "status": "ok", "count": 1, "fetched_at": "2026-11-10T12:00:00+09:00",
+   "evidence": {"review": 0}, "notes": [],
+   "items": [{"kind": "brew-cask", "name": "claude-code", "version": "2.0.1", "origin": "homebrew/cask", "bundle_id": null, "path": null, "review": null}]},
+  {"source": "app", "layer": "inventory", "status": "ok", "count": 2, "fetched_at": "2026-11-10T12:00:00+09:00",
+   "evidence": {"review": 0}, "notes": [],
+   "items": [
+     {"kind": "app", "name": "Firefox", "version": "140.0", "origin": "sparkle", "bundle_id": "org.mozilla.firefox", "path": "/Applications/Firefox.app", "review": null},
+     {"kind": "app", "name": "Keynote", "version": "14.4", "origin": "appstore", "bundle_id": "com.apple.iWork.Keynote", "path": "/Applications/Keynote.app", "review": null}]},
+  {"source": "npm", "layer": "inventory", "status": "ok", "count": 1, "fetched_at": "2026-11-10T12:00:00+09:00",
+   "evidence": {"review": 0}, "notes": [],
+   "items": [{"kind": "npm", "name": "lodash", "version": "4.17.15", "origin": null, "bundle_id": null, "path": null, "review": null}]},
+  {"source": "macos", "layer": "inventory", "status": "ok", "count": 2, "fetched_at": "2026-11-10T12:00:00+09:00",
+   "evidence": {"review": 0}, "notes": [],
+   "items": [
+     {"kind": "macos", "name": "macOS", "version": "27.1", "origin": null, "bundle_id": null, "path": null, "review": null},
+     {"kind": "macos", "name": "Safari", "version": "27.1", "origin": null, "bundle_id": "com.apple.Safari", "path": "/Applications/Safari.app", "review": null}]},
+  {"source": "ruby", "layer": "inventory", "status": "ok", "count": 1, "fetched_at": "2026-11-10T12:00:00+09:00",
+   "evidence": {"review": 0}, "notes": [],
+   "items": [{"kind": "ruby", "name": "ruby", "version": "3.4.1", "origin": "rbenv", "bundle_id": null, "path": null, "review": null}]},
+  {"source": "vscode", "layer": "inventory", "status": "ok", "count": 2, "fetched_at": "2026-11-10T12:00:00+09:00",
+   "evidence": {"review": 0}, "notes": [],
+   "items": [
+     {"kind": "vscode", "name": "ms-python.python", "version": "2026.1.0", "origin": null, "bundle_id": null, "path": null, "review": null},
+     {"kind": "vscode", "name": "example.removed-extension", "version": "1.0.0", "origin": null, "bundle_id": null, "path": null, "review": null}]}
+]

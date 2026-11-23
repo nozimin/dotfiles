@@ -1,0 +1,1473 @@
+#!/bin/bash
+# vuln-check skill の決定的な処理（収集・照合・バージョン比較）。仕様は docs/specs/vuln-check.md。
+# 読み取り専用。パッケージやアプリ、brew のメタデータを変更しない。
+#
+# 構成（サブコマンドを足すときに読む）
+# - サブコマンド <名前> は関数 cmd_<名前> で実装する。main は関数があれば呼び、無ければ「未実装」で失敗する。
+#   cmd_<名前> はエンベロープ（1 行の JSON）を標準出力に出す。main がまとめて 1 つの配列にする。
+# - envelope <ソース> <層> <状態> <件数> <evidence の JSON> [補足...] < items の JSON 配列
+#   envelope_error <ソース> <層> <evidence の JSON> <補足...>
+# - fetch_source <ソース> <層> <URL> <保存先> [curl のオプション...]
+#   取得に失敗したら error、空なら warn のエンベロープを出して 1 を返す。呼び出し側は `|| return 0` で抜ける。
+#   URL は下の *_URL を使う（VULNCHECK_*_URL で差し替え、file:// も可）。エンベロープを作らない取得は fetch。
+#   多数の URL を並列に取るときは fetch_many（1 件ごとの結果を出す）。
+# - 層1の RSS は fetch_source で取得し、rss_items で xmllint で項目を読み、LAYER1_JQ の rss_summary で取得できた期間と鮮度を見る。
+#   インベントリとの緩い名前一致は MATCH_JQ の token_index と candidate。
+# - run_source <ソース> <層> <関数> [引数...]
+#   関数をサブシェルで実行し、途中で失敗したら error のエンベロープにする。ソースごとに囲み、他のソースを止めない。
+#   エンベロープを 1 つも出さずに終わったときも error にする（ソースが結果から消えないように）。
+# - inventory_items [kind...] でインベントリの項目を JSON 配列で得る（--inventory が無ければその場で集める）。
+#   エンベロープごと読むときは ensure_inventory のあと $INVENTORY_FILE を jq で読む。
+#   照合に使う kind のインベントリの欠け（取得失敗か要確認）は inventory_notes [kind...] で補足として得て、
+#   add_warn_notes で呼び出し側の notes に足して warn にする（ソースの要確認の補足も add_warn_notes で足す）。
+# - now_epoch / now_iso は現在時刻（VULNCHECK_NOW で差し替え）。iso_to_epoch / epoch_to_iso で変換する。
+# - version_compare <A> <B> は lt / eq / gt を出す。比較できなければ 2 を返す。
+# - 一時ファイルは $WORK_DIR に置く（終了時に消す）。
+# - bash 3.2 では $(...) の中で set -e が効かない。$(...) の中で呼ぶ関数は、失敗を自分で return する。
+
+set -euo pipefail
+
+# 取得元（§3.3）
+# shellcheck disable=SC2034 # 各サブコマンドで使う
+{
+  OSV_URL="${VULNCHECK_OSV_URL:-https://api.osv.dev}"
+  BREW_FORMULA_URL="${VULNCHECK_BREW_FORMULA_URL:-https://formulae.brew.sh/api/formula}"
+  BREW_CASK_URL="${VULNCHECK_BREW_CASK_URL:-https://formulae.brew.sh/api/cask.json}"
+  ITUNES_URL="${VULNCHECK_ITUNES_URL:-https://itunes.apple.com/lookup}"
+  EOL_URL="${VULNCHECK_EOL_URL:-https://endoflife.date/api}"
+  KEV_URL="${VULNCHECK_KEV_URL:-https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json}"
+  JVN_IPEDIA_URL="${VULNCHECK_JVN_IPEDIA_URL:-https://jvndb.jvn.jp/ja/rss/jvndb_new.rdf}"
+  JVN_URL="${VULNCHECK_JVN_URL:-https://jvn.jp/rss/jvn.rdf}"
+  JPCERT_URL="${VULNCHECK_JPCERT_URL:-https://www.jpcert.or.jp/rss/jpcert.rdf}"
+  VSCODE_REMOVED_URL="${VULNCHECK_VSCODE_REMOVED_URL:-https://raw.githubusercontent.com/microsoft/vsmarketplace/main/RemovedPackages.md}"
+}
+
+FETCH_TIMEOUT=60
+PLIST_BUDDY=/usr/libexec/PlistBuddy
+APPS_DIR=/Applications
+VSCODE_APP_CLI="$APPS_DIR/Visual Studio Code.app/Contents/Resources/app/bin/code"
+# app のインベントリを探す場所（: 区切り。VULNCHECK_APP_DIRS で差し替え。§3.3）と、探す深さ（§4）
+APP_DIRS="${VULNCHECK_APP_DIRS:-$APPS_DIR:$HOME/Applications}"
+APP_SEARCH_DEPTH=3
+
+INVENTORY_FILE=""
+NOW_EPOCH=""
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vulncheck.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+BREW_JSON="$WORK_DIR/brew-installed.json"
+
+die() {
+  printf 'vulncheck: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+使い方: vulncheck <サブコマンド>
+
+  inventory                   インベントリを集める
+  osv [--inventory FILE]      言語パッケージを OSV で照合する
+  latest [--inventory FILE]   brew・アプリ・OS・ランタイムを最新版と比べる
+  vscode [--inventory FILE]   VS Code 拡張を削除済み一覧と照合する
+  kev [--inventory FILE]      KEV から照合候補を出す
+  jvn [--inventory FILE]      JVN iPedia と JVN の RSS から照合候補を出す
+  jpcert                      JPCERT/CC の RSS にある注意喚起を出す
+  compare A B                 バージョンを比べて lt / eq / gt を出す
+  latest-report               最新のレポートの .json のパスを出す（無ければ失敗）
+  all [--save]                inventory とその他すべてを実行する
+
+出力はエンベロープの JSON 配列（compare と latest-report を除く）。
+--inventory を省略すると、その場で inventory を実行する。
+all --save は、新しく作った一時ディレクトリのファイルに出力を書き、そのパスだけを出す（前回までの保存先は消す）。
+EOF
+}
+
+has_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# iso_to_epoch <日時>
+# ISO 8601（2026-11-09、2026-11-09T15:30、2026-11-09T15:30:00+09:00、…Z）をエポック秒にする。
+# 時差が無ければローカル時刻として扱う。解釈できなければ 1 を返す。
+iso_to_epoch() {
+  local re='^([0-9]{4}-[0-9]{2}-[0-9]{2})(T([0-9]{2}:[0-9]{2})(:[0-9]{2})?(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?)?$'
+  local datetime zone
+  [[ $1 =~ $re ]] || return 1
+  datetime="${BASH_REMATCH[1]} ${BASH_REMATCH[3]:-00:00}${BASH_REMATCH[4]:-:00}"
+  zone="${BASH_REMATCH[6]:-}"
+  case "$zone" in
+    "") date -j -f '%Y-%m-%d %H:%M:%S' "$datetime" +%s ;;
+    Z) date -j -f '%Y-%m-%d %H:%M:%S%z' "$datetime+0000" +%s ;;
+    *) date -j -f '%Y-%m-%d %H:%M:%S%z' "$datetime${zone/:/}" +%s ;;
+  esac
+}
+
+# epoch_to_iso <エポック秒>
+# ローカル時刻の ISO 8601（2026-11-09T15:30:00+09:00）にする。
+epoch_to_iso() {
+  local s
+  s="$(date -j -r "$1" '+%Y-%m-%dT%H:%M:%S%z')" || return 1
+  printf '%s:%s\n' "${s%??}" "${s: -2}"
+}
+
+now_epoch() {
+  if [ -n "$NOW_EPOCH" ]; then
+    echo "$NOW_EPOCH"
+  else
+    date +%s
+  fi
+}
+
+now_iso() {
+  epoch_to_iso "$(now_epoch)"
+}
+
+# envelope <ソース> <層> <状態> <件数> <evidence の JSON> [補足...]
+# 標準入力の items（JSON 配列）からエンベロープを 1 つ組み立て、1 行の JSON で出す（§3.1）。
+envelope() {
+  local source="$1" layer="$2" status="$3" count="$4" evidence="$5" fetched_at
+  shift 5
+  case "$status" in
+    ok | warn | error) ;;
+    *) die "envelope: 状態が不正です: $status" ;;
+  esac
+  fetched_at="$(now_iso)" || return 1
+  jq -c --arg source "$source" --arg layer "$layer" --arg status "$status" \
+    --argjson count "$count" --argjson evidence "$evidence" --arg fetched_at "$fetched_at" \
+    '{source: $source, layer: $layer, status: $status, count: $count, fetched_at: $fetched_at,
+      evidence: $evidence, notes: $ARGS.positional, items: .}' --args -- "$@"
+}
+
+# envelope_error <ソース> <層> <evidence の JSON> <補足...>
+envelope_error() {
+  local source="$1" layer="$2" evidence="$3"
+  shift 3
+  echo '[]' | envelope "$source" "$layer" error 0 "$evidence" "$@"
+}
+
+# fetch <URL> <保存先> [curl のオプション...]
+# 失敗したら（HTTP エラー、タイムアウト、file:// のファイルが無い）curl のメッセージを標準エラーに出して非 0 を返す。
+fetch() {
+  local url="$1" out="$2"
+  shift 2
+  curl -fsSL --max-time "$FETCH_TIMEOUT" -o "$out" "$@" --url "$url"
+}
+
+# fetch_source <ソース> <層> <URL> <保存先> [curl のオプション...]
+# 取得できて中身があれば 0 を返す。取得に失敗したら error、空なら warn のエンベロープを出して 1 を返す（§3.2）。
+fetch_source() {
+  local source="$1" layer="$2" url="$3" out="$4" evidence message
+  shift 4
+  evidence="$(jq -nc --arg url "$url" '{url: $url}')"
+  if ! message="$(fetch "$url" "$out" "$@" 2>&1)"; then
+    envelope_error "$source" "$layer" "$evidence" "取得に失敗しました: ${message:-curl が失敗しました}"
+    return 1
+  fi
+  if [ ! -s "$out" ]; then
+    echo '[]' | envelope "$source" "$layer" warn 0 "$evidence" "応答が空でした"
+    return 1
+  fi
+}
+
+# run_source <ソース> <層> <関数> [引数...]
+# 関数を set -e のサブシェルで実行する。途中で失敗したら出力を捨て、標準エラーの末尾を補足にした error のエンベロープを出す。
+# 終了コードが 0 でも、エンベロープを 1 つも出さなかったら error にする（§3.1。ソースが結果から消えないように）。
+run_source() {
+  local source="$1" layer="$2" out err rc count message detail
+  shift 2
+  out="$(mktemp "$WORK_DIR/out.XXXXXX")"
+  err="$(mktemp "$WORK_DIR/err.XXXXXX")"
+  set +e
+  (
+    set -e
+    "$@"
+  ) >"$out" 2>"$err"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    message="処理に失敗しました（終了コード ${rc}）"
+  elif ! count="$(jq -s length "$out" 2>/dev/null)"; then
+    message="出力を JSON として読めませんでした"
+  elif [ "$count" -eq 0 ]; then
+    message="エンベロープが出力されませんでした"
+  else
+    cat "$out"
+    return 0
+  fi
+  detail="$(tail -n 5 "$err")"
+  envelope_error "$source" "$layer" '{}' "${message}${detail:+: $detail}"
+}
+
+# ensure_inventory
+# --inventory が無ければ、その場で inventory を実行して $INVENTORY_FILE に保存する（1 回の実行で 1 度だけ）。
+ensure_inventory() {
+  if [ -e "$INVENTORY_FILE" ]; then
+    return 0
+  fi
+  cmd_inventory | jq -s . >"$INVENTORY_FILE.tmp"
+  mv "$INVENTORY_FILE.tmp" "$INVENTORY_FILE"
+}
+
+# inventory_items [kind...]
+# インベントリの項目を JSON 配列で出す。kind を指定すればその kind だけ。
+inventory_items() {
+  ensure_inventory || return 1
+  jq -c '[.[] | select(.layer == "inventory") | .items[]
+    | select(($ARGS.positional | length) == 0 or (.kind | IN($ARGS.positional[])))]' "$INVENTORY_FILE" --args -- "$@"
+}
+
+# --inventory FILE を読む（§3.4）。FILE は inventory の出力（エンベロープの配列）と同じ形
+parse_inventory_option() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --inventory)
+        [ "$#" -ge 2 ] || die "--inventory にファイルを指定してください"
+        INVENTORY_FILE="$2"
+        shift 2
+        ;;
+      *) die "不明な引数です: $1" ;;
+    esac
+  done
+  if [ -z "$INVENTORY_FILE" ]; then
+    return 0
+  fi
+  [ -r "$INVENTORY_FILE" ] || die "--inventory のファイルを読めません: $INVENTORY_FILE"
+  jq -e 'type == "array"
+    and all(.[]; type == "object" and (.items | type) == "array")
+    and any(.[]; .layer == "inventory")' "$INVENTORY_FILE" >/dev/null 2>&1 ||
+    die "--inventory のファイルが inventory の出力の形ではありません: $INVENTORY_FILE"
+}
+
+# バージョン比較（§7）の awk。ARGV[1] と ARGV[2] を比べて lt / eq / gt を出す。比べられなければメッセージを出して 2 で終わる。
+# 版を「数字の並び」と「英字の並び」の要素に分け、先頭から 1 つずつ比べる（9.9p1 は 9 9 p 1、1.0.0rc1 は 1 0 0 rc 1）。
+# 同じ位置の要素の大小: プレリリースの印 < 版の終わり < それ以外の英字（リリース後の印）< 数字。
+# 版の終わりは数字の 0 と同じに扱う（1.0 eq 1.0.0）。印どうしは順位で、英字どうしは辞書順で、数字どうしは数として比べる
+VERSION_AWK='
+  # 版 s を要素に分け、種別（pre / post / num）を kind[i] に、値を value[i] に入れて要素の数を返す。
+  # 比べられなければ理由を why に入れて -1 を返す
+  function parse(s, kind, value,    n, chunks, count, i, rest, len, token) {
+    sub(/^[ \t]+/, "", s)
+    sub(/^[vV]/, "", s)
+    # 最初の空白か ( から後ろは捨てる（5.10.2 GM (b5299, …) は 5.10.2）
+    sub(/[ \t(].*$/, "", s)
+    s = tolower(s)
+    if (s == "") { why = "空"; return -1 }
+    if (s !~ /[0-9]/) { why = "数字を含まない"; return -1 }
+    if (s ~ /[^0-9a-z._+-]/) { why = "区切り（. - _ +）以外の記号がある"; return -1 }
+    n = 0
+    count = split(s, chunks, /[._+-]/)
+    for (i = 1; i <= count; i++) {
+      rest = chunks[i]
+      if (length(rest) >= 7 && rest ~ /^[0-9a-f]+$/ && rest ~ /[a-f]/) { why = "コミットの SHA のような 16 進の並び"; return -1 }
+      while (rest != "") {
+        n++
+        if (match(rest, /^[0-9]+/)) {
+          len = RLENGTH
+          token = substr(rest, 1, len)
+          # 先頭の 0 を落とした数字の並び（0 は空）
+          sub(/^0+/, "", token)
+          kind[n] = "num"
+          value[n] = token
+        } else {
+          match(rest, /^[a-z]+/)
+          len = RLENGTH
+          token = substr(rest, 1, len)
+          # 1 文字の a b c は、直後に数字が続くときだけ印とする（2025a や 1.1.1a は印ではない）
+          if ((token in RANK) && (length(token) > 1 || substr(rest, len + 1) ~ /^[0-9]/)) {
+            kind[n] = "pre"
+            value[n] = RANK[token]
+          } else {
+            kind[n] = "post"
+            value[n] = token
+          }
+        }
+        rest = substr(rest, len + 1)
+      }
+    }
+    return n
+  }
+  function order(k) { return k == "pre" ? 1 : (k == "end" ? 2 : (k == "post" ? 3 : 4)) }
+  function compare_values(k, x, y) {
+    if (k == "pre") { x += 0; y += 0 }
+    else if (k == "num" && length(x) != length(y)) return length(x) < length(y) ? -1 : 1
+    else { x = x ""; y = y "" }
+    return x < y ? -1 : (x > y ? 1 : 0)
+  }
+  function fail(s) {
+    printf "vulncheck: 比べられないバージョンです（%s）: %s\n", why, s > "/dev/stderr"
+    exit 2
+  }
+  BEGIN {
+    RANK["dev"] = 0
+    RANK["alpha"] = RANK["a"] = 1
+    RANK["beta"] = RANK["b"] = 2
+    RANK["pre"] = RANK["preview"] = RANK["c"] = RANK["rc"] = 3
+    na = parse(ARGV[1], ka, va)
+    if (na < 0) fail(ARGV[1])
+    nb = parse(ARGV[2], kb, vb)
+    if (nb < 0) fail(ARGV[2])
+    r = 0
+    for (i = 1; r == 0 && (i <= na || i <= nb); i++) {
+      x = i <= na ? ka[i] : "end"
+      y = i <= nb ? kb[i] : "end"
+      if (x == "end" && y == "num") x = "num"
+      if (y == "end" && x == "num") y = "num"
+      if (x != y) r = order(x) < order(y) ? -1 : 1
+      else r = compare_values(x, va[i], vb[i])
+    }
+    print (r < 0 ? "lt" : (r > 0 ? "gt" : "eq"))
+  }
+'
+
+# version_compare <A> <B>
+# A<B なら lt、等しければ eq、A>B なら gt を出す（§7。規則は VERSION_AWK）。
+# 空、数字を含まない、区切り以外の記号がある、コミットの SHA のような並びがあるときは、メッセージを出して 2 を返す。
+version_compare() {
+  awk "$VERSION_AWK" "$1" "$2"
+}
+
+# --- inventory（§4） ---
+
+# inventory_result <kind> <ok|warn> <evidence の JSON> [補足...]
+# 標準入力の項目（JSON 配列）から inventory のエンベロープを出す。各項目に review（§3.1 の項目ごとの要確認）を付ける。
+# バージョン不明の項目は理由を入れ（呼び出し側が付けた理由はそのまま）、それ以外は null。evidence.review にその件数を入れる。
+# 0 件は warn。ただし evidence に empty_reason（0 件を示すツールの出力の要点）があれば ok のまま（§4）。
+inventory_result() {
+  local kind="$1" status="$2" evidence="$3" items count review
+  shift 3
+  items="$(jq -c 'if type == "array" then map(. + {review: (.review // (if .version == null then "バージョン不明" else null end))})
+    else error("項目が JSON 配列ではありません") end')"
+  count="$(jq length <<<"$items")"
+  review="$(jq -r '[.[] | select(.review != null) | "\(.name): \(.review)"] | join("; ")' <<<"$items")"
+  if [ "$count" -eq 0 ] && ! jq -e 'has("empty_reason")' <<<"$evidence" >/dev/null; then
+    status=warn
+    set -- "$@" "0 件でした"
+  fi
+  if [ -n "$review" ]; then
+    set -- "$@" "要確認の項目: $review"
+  fi
+  evidence="$(jq -c --argjson items "$items" '. + {review: ([$items[] | select(.review != null)] | length)}' <<<"$evidence")"
+  envelope "$kind" inventory "$status" "$count" "$evidence" "$@" <<<"$items"
+}
+
+# inventory_missing <kind> <コマンド>
+# ツールが入っていない kind は ok + 0 件にする
+inventory_missing() {
+  echo '[]' | envelope "$1" inventory ok 0 "$(jq -nc --arg command "$2" '{command: $command}')" "未インストール（$2 が見つかりません）"
+}
+
+# with_empty_reason <evidence の JSON> <0 件を示す出力の要点>
+# 0 件が正常であり得る kind（npm / pnpm / uv / vscode / brew-cask / ruby と、Ruby が無いときの gem）で、ツールの出力が 0 件を示しているときに
+# evidence に empty_reason を足す（inventory_result はこれがあれば 0 件でも ok にする）
+with_empty_reason() {
+  jq -c --arg reason "$2" '. + {empty_reason: $reason}' <<<"$1"
+}
+
+# brew が記録したインストール済みの formula と cask を $BREW_JSON に保存する（ローカル情報のみ。1 回の実行で 1 度だけ）
+load_brew_installed() {
+  if [ -s "$BREW_JSON" ]; then
+    return 0
+  fi
+  HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 brew info --json=v2 --installed </dev/null >"$BREW_JSON.tmp" || return 1
+  mv "$BREW_JSON.tmp" "$BREW_JSON"
+}
+
+# plist_get <plist> <キー>
+# 値を出す。ファイルかキーが無ければ何も出さない。
+plist_get() {
+  "$PLIST_BUDDY" -c "Print :$2" "$1" 2>/dev/null || true
+}
+
+# 使っている keg（リンク中、無ければ最も新しいもの）のバージョン。revision（_1）も含む
+inventory_brew_formula() {
+  local cellar items
+  if ! has_command brew; then
+    inventory_missing brew-formula brew
+    return 0
+  fi
+  load_brew_installed
+  cellar="$(HOMEBREW_NO_AUTO_UPDATE=1 brew --cellar)"
+  items="$(jq -c --arg cellar "$cellar" '[.formulae[]
+    | (.linked_keg // (.installed | last | .version?)) as $version
+    | {kind: "brew-formula", name: .name, version: $version, origin: .tap, bundle_id: null,
+       path: (if $version then "\($cellar)/\(.name)/\($version)" else null end)}]' "$BREW_JSON")"
+  inventory_result brew-formula ok '{"command":"brew info --json=v2 --installed"}' <<<"$items"
+}
+
+# .app もフォントも持たない cask（.app を持つ cask は app で扱う）
+inventory_brew_cask() {
+  local caskroom evidence items
+  if ! has_command brew; then
+    inventory_missing brew-cask brew
+    return 0
+  fi
+  load_brew_installed
+  caskroom="$(HOMEBREW_NO_AUTO_UPDATE=1 brew --caskroom)"
+  evidence="$(jq -c '[.casks[] | [.artifacts[]? | objects | keys[]]] as $kinds
+    | {command: "brew info --json=v2 --installed", casks: ($kinds | length),
+       with_app: ([$kinds[] | select(index("app"))] | length),
+       fonts: ([$kinds[] | select(index("font"))] | length)}' "$BREW_JSON")"
+  items="$(jq -c --arg caskroom "$caskroom" '[.casks[]
+    | select([.artifacts[]? | objects | keys[]] | index("app") or index("font") | not)
+    | {kind: "brew-cask", name: .token, version: .installed, origin: .tap, bundle_id: null,
+       path: (if .installed then "\($caskroom)/\(.token)/\(.installed)" else null end)}]' "$BREW_JSON")"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" ".app もフォントも持たない cask が無い")"
+  fi
+  inventory_result brew-cask ok "$evidence" <<<"$items"
+}
+
+# APP_DIRS（/Applications と ~/Applications）の下の .app。バージョンは brew の記録ではなく Info.plist から読む。Safari は macos で扱う
+inventory_app() {
+  local app plist name bundle_id version review origin evidence found=0 status=ok cask_apps='[]' items="$WORK_DIR/app-items.jsonl"
+  local dir list="$WORK_DIR/app-paths.txt" err="$WORK_DIR/app-find.err"
+  local notes=() dirs=()
+  if has_command brew; then
+    if load_brew_installed 2>/dev/null; then
+      cask_apps="$(jq -c '[.casks[] | .artifacts[]? | objects | select(has("app"))
+        | (.app[] | if type == "string" then . else .target? end), .target? | strings | split("/") | last]' "$BREW_JSON")"
+    else
+      status=warn
+      notes+=("brew の記録を読めず、origin の brew-cask を判定できませんでした")
+    fi
+  fi
+  # 各場所の下を APP_SEARCH_DEPTH 階層まで探す（BOSS/GX-10/… のようなベンダーのフォルダの中も）。.app の中には入らない。
+  # Safari.app のようなシンボリックリンクの .app も拾う。無い場所（~/Applications など）は飛ばす
+  IFS=: read -r -a dirs <<<"$APP_DIRS"
+  : >"$list"
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    [ -d "$dir" ] || continue
+    if ! find "$dir" -mindepth 1 -maxdepth "$APP_SEARCH_DEPTH" -name '*.app' \( -type d -o -type l \) -prune -print 2>"$err" |
+      sort >>"$list"; then
+      status=warn
+      notes+=("$dir の一部を探せませんでした: $(head -n 1 "$err")")
+    fi
+  done
+  : >"$items"
+  while IFS= read -r app; do
+    [ -d "$app" ] || continue
+    found=$((found + 1))
+    plist="$app/Contents/Info.plist"
+    name="$(basename "$app" .app)"
+    bundle_id="$(plist_get "$plist" CFBundleIdentifier)"
+    if [ "$bundle_id" = com.apple.Safari ]; then
+      notes+=("Safari は macos で扱う")
+      continue
+    fi
+    version="$(plist_get "$plist" CFBundleShortVersionString)"
+    review=""
+    if [ -z "$version" ]; then
+      version="$(plist_get "$plist" CFBundleVersion)"
+      if [ -n "$version" ]; then
+        # CFBundleVersion だけのアプリ（Steam など）は、それが製品のバージョンとは限らないので採らない
+        review="バージョン不明（CFBundleShortVersionString が無い。CFBundleVersion は ${version}）"
+        version=""
+      fi
+    fi
+    if [ -e "$app/Contents/_MASReceipt" ]; then
+      origin=appstore
+    elif jq -e --arg app "$name.app" 'index($app)' <<<"$cask_apps" >/dev/null; then
+      origin=brew-cask
+    elif [ -n "$(plist_get "$plist" SUFeedURL)" ]; then
+      origin=sparkle
+    else
+      origin=other
+    fi
+    jq -nc --arg name "$name" --arg version "$version" --arg origin "$origin" --arg bundle_id "$bundle_id" --arg path "$app" \
+      --arg review "$review" \
+      '{kind: "app", name: $name, version: ($version | select(. != "") // null), origin: $origin,
+        bundle_id: ($bundle_id | select(. != "") // null), path: $path, review: ($review | select(. != "") // null)}' >>"$items"
+  done <"$list"
+  evidence="$(jq -nc --argjson found "$found" --argjson depth "$APP_SEARCH_DEPTH" '{dirs: $ARGS.positional, depth: $depth, apps: $found}' \
+    --args -- ${dirs[@]+"${dirs[@]}"})"
+  jq -s -c . "$items" | inventory_result app "$status" "$evidence" ${notes[@]+"${notes[@]}"}
+}
+
+inventory_npm() {
+  local out="$WORK_DIR/npm.json" rc=0 status=ok items evidence='{"command":"npm ls -g --json --depth=0"}'
+  if ! has_command npm; then
+    inventory_missing npm npm
+    return 0
+  fi
+  npm ls -g --json --depth=0 </dev/null >"$out" || rc=$?
+  jq -e 'type == "object" and (has("error") | not)' "$out" >/dev/null || die "npm ls -g の出力を読めません（終了コード ${rc}）"
+  if [ "$rc" -ne 0 ]; then
+    status=warn
+    set -- "npm ls -g が終了コード $rc を返しました（一覧が不完全なおそれ）: $(jq -r '.problems // [] | join("; ")' "$out")"
+  fi
+  items="$(jq -c '[.dependencies // {} | to_entries[]
+    | {kind: "npm", name: .key, version: (.value.version // null), origin: null, bundle_id: null, path: null}]' "$out")"
+  if [ "$items" = "[]" ] && [ "$rc" -eq 0 ]; then
+    evidence="$(with_empty_reason "$evidence" "dependencies が空")"
+  fi
+  inventory_result npm "$status" "$evidence" "$@" <<<"$items"
+}
+
+inventory_pnpm() {
+  local out="$WORK_DIR/pnpm.json" items evidence='{"command":"pnpm ls -g --json"}'
+  if ! has_command pnpm; then
+    inventory_missing pnpm pnpm
+    return 0
+  fi
+  pnpm ls -g --json </dev/null >"$out"
+  items="$(jq -c '[.[] | (.dependencies // {}) + (.optionalDependencies // {}) + (.devDependencies // {}) | to_entries[]
+    | {kind: "pnpm", name: .key, version: (.value.version // null), origin: null, bundle_id: null, path: null}]' "$out")"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" "依存が無い: $(jq -c . "$out" | cut -c 1-200)")"
+  fi
+  inventory_result pnpm ok "$evidence" <<<"$items"
+}
+
+inventory_uv() {
+  local out="$WORK_DIR/uv.txt" err="$WORK_DIR/uv.err" items evidence='{"command":"uv tool list"}'
+  if ! has_command uv; then
+    inventory_missing uv uv
+    return 0
+  fi
+  uv tool list </dev/null >"$out" 2>"$err" || die "uv tool list が失敗しました: $(cat "$err")"
+  # 「名前 v バージョン」の行を読み、続く「- 実行ファイル」の行は読み飛ばす
+  items="$(jq -R -n -c '[inputs | select(length > 0 and (startswith("-") | not))
+    | (capture("^(?<name>[^ ]+) v(?<version>[^ ]+)") // {name: ., version: null})
+    | {kind: "uv", name, version, origin: null, bundle_id: null, path: null}]' "$out")"
+  # 0 件のときは標準エラーに No tools installed と出る。出ないのに 0 件なら warn のまま
+  if [ "$items" = "[]" ] && grep -q 'No tools installed' "$err"; then
+    evidence="$(with_empty_reason "$evidence" "No tools installed")"
+  elif [ -s "$err" ]; then
+    set -- "uv tool list: $(head -n 1 "$err")"
+  fi
+  inventory_result uv ok "$evidence" "$@" <<<"$items"
+}
+
+# rbenv の各 Ruby で gem list。インストールされている版ごとに 1 項目、origin は Ruby のバージョン
+inventory_gem() {
+  local rubies ruby evidence status=ok out="$WORK_DIR/gem.txt" items="$WORK_DIR/gem-items.jsonl"
+  local notes=()
+  if ! has_command rbenv; then
+    inventory_missing gem rbenv
+    return 0
+  fi
+  rubies="$(rbenv versions --bare </dev/null)"
+  : >"$items"
+  while IFS= read -r ruby; do
+    [ -n "$ruby" ] || continue
+    if ! RBENV_VERSION="$ruby" rbenv exec gem list --local </dev/null >"$out" 2>&1; then
+      status=warn
+      notes+=("Ruby $ruby の gem list が失敗しました: $(tail -n 1 "$out")")
+      continue
+    fi
+    # 例: nokogiri (1.18.7 arm64-darwin, 1.16.0)、csv (3.3.7, default: 3.2.8 ruby)
+    jq -R -n -c --arg origin "rbenv $ruby" '[inputs | select(length > 0 and (startswith("***") | not))
+      | (capture("^(?<name>[^ ]+) \\((?<versions>.*)\\)$") // {name: ., versions: null})
+      | .name as $name
+      | if .versions then .versions | split(", ")[] | sub("^default: "; "") | split(" ")[0] else null end
+      | {kind: "gem", name: $name, version: ., origin: $origin, bundle_id: null, path: null}] | unique' "$out" >>"$items"
+  done <<<"$rubies"
+  evidence="$(jq -s -c '{command: "gem list --local", rubies: length, gems: (add // [] | map(.name) | unique | length)}' "$items")"
+  # Ruby が 1 つも無ければ gem も無いので 0 件で ok（§4）。照合する側に warn を広げない
+  if [ -z "${rubies//[[:space:]]/}" ]; then
+    evidence="$(with_empty_reason "$evidence" "rbenv に Ruby が無い（rbenv versions --bare が空）")"
+  fi
+  jq -s -c 'add // []' "$items" | inventory_result gem "$status" "$evidence" ${notes[@]+"${notes[@]}"}
+}
+
+# macOS 本体と Safari（Safari は macOS に含めて扱う）
+inventory_macos() {
+  local version build extra safari evidence
+  version="$(sw_vers -productVersion)"
+  build="$(sw_vers -buildVersion)"
+  extra="$(sw_vers -productVersionExtra 2>/dev/null || true)"
+  safari="$(plist_get "$APPS_DIR/Safari.app/Contents/Info.plist" CFBundleShortVersionString)"
+  evidence="$(jq -nc --arg build "$build" --arg extra "$extra" \
+    '{command: "sw_vers", build: $build, extra: ($extra | select(. != "") // null)}')"
+  jq -n -c --arg version "$version" --arg safari "$safari" --arg path "$APPS_DIR/Safari.app" \
+    '[{kind: "macos", name: "macOS", version: $version, origin: null, bundle_id: null, path: null},
+      {kind: "macos", name: "Safari", version: ($safari | select(. != "") // null), origin: null,
+       bundle_id: "com.apple.Safari", path: $path}]' |
+    inventory_result macos ok "$evidence"
+}
+
+# rbenv の Ruby 本体。jruby-9.4.0.0 のような名前は名前とバージョンに分ける
+inventory_ruby() {
+  local root items evidence='{"command":"rbenv versions --bare"}'
+  if ! has_command rbenv; then
+    inventory_missing ruby rbenv
+    return 0
+  fi
+  root="$(rbenv root)"
+  items="$(rbenv versions --bare </dev/null |
+    jq -R -n -c --arg root "$root" '[inputs | select(length > 0)
+      | (capture("^(?<name>[a-z][a-z-]*?)-(?<version>[0-9].*)$") // {name: "ruby", version: .}) + {dir: .}
+      | {kind: "ruby", name, version, origin: "rbenv", bundle_id: null, path: "\($root)/versions/\(.dir)"}]')"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" "出力が空（終了コード 0）")"
+  fi
+  inventory_result ruby ok "$evidence" <<<"$items"
+}
+
+# PATH に code が無ければ .app の中のものを使う
+inventory_vscode() {
+  local code items evidence
+  if has_command code; then
+    code="$(command -v code)"
+  elif [ -x "$VSCODE_APP_CLI" ]; then
+    code="$VSCODE_APP_CLI"
+  else
+    inventory_missing vscode code
+    return 0
+  fi
+  items="$("$code" --list-extensions --show-versions </dev/null |
+    jq -R -n -c '[inputs | select(length > 0)
+      | (capture("^(?<name>[^@ ]+)@(?<version>[^ ]+)$") // {name: ., version: null})
+      | {kind: "vscode", name, version, origin: null, bundle_id: null, path: null}]')"
+  evidence="$(jq -nc --arg command "$code --list-extensions --show-versions" '{command: $command}')"
+  if [ "$items" = "[]" ]; then
+    evidence="$(with_empty_reason "$evidence" "出力が空（終了コード 0）")"
+  fi
+  inventory_result vscode ok "$evidence" <<<"$items"
+}
+
+cmd_inventory() {
+  local kind
+  for kind in brew-formula brew-cask app npm pnpm uv gem macos ruby vscode; do
+    run_source "$kind" inventory "inventory_${kind//-/_}"
+  done
+}
+
+# --- 層2（§5） ---
+# OSV_URL / BREW_FORMULA_URL / EOL_URL はベース URL。file:// のときもその下の同じパス
+# （v1/querybatch、v1/vulns/<id>、<formula>.json、ruby.json）を読む。
+
+OSV_BATCH=1000
+
+# fetch_many <リスト> [curl のオプション...]
+# リストの各行「URL<TAB>保存先」を並列に取得する。1 件が失敗しても残りは取得する。
+# 1 件ごとに「保存先<TAB>curl の終了コード<TAB>HTTP の状態コード<TAB>エラー」を出す（順不同）。
+# HTTP/2 の 404 は終了コードが 22 ではなく 56 になるので、404 かどうかは状態コードで見る。
+# curl が結果を出さなかったものは終了コード -1 にする（§3.2。結果の報告が空なら、すべてを失敗として扱う）。
+fetch_many() {
+  local list="$1" report url out
+  local args=()
+  shift
+  while IFS=$'\t' read -r url out; do
+    args+=(-o "$out" --url "$url")
+  done <"$list"
+  if [ "${#args[@]}" -eq 0 ]; then
+    return 0
+  fi
+  report="$(mktemp "$WORK_DIR/fetch.XXXXXX")"
+  curl -fsSL --parallel --parallel-max 8 --max-time "$FETCH_TIMEOUT" \
+    -w '%{filename_effective}\t%{exitcode}\t%{response_code}\t%{errormsg}\n' "$@" "${args[@]}" >"$report" 2>/dev/null || true
+  # NR == FNR で 1 つ目のファイルを見分けると、報告が空のときにリストの行をそのまま出してしまうので、ファイル名で見分ける
+  awk -F '\t' 'FILENAME == ARGV[1] { seen[$1] = 1; print; next }
+    !($2 in seen) { print $2 "\t-1\t000\tcurl が結果を出しませんでした" }' "$report" "$list"
+}
+
+# inventory_notes [kind...]
+# 指定した kind（省略したらすべて）のインベントリが取得失敗か要確認（0 件のときも、一部の取得の失敗で項目があるときも）なら、
+# その旨の補足を 1 行ずつ出す。照合の対象から漏れているおそれがあるので、呼び出し側は add_warn_notes で warn にする（§3.1）。
+inventory_notes() {
+  ensure_inventory || return 1
+  jq -r '.[] | select(.layer == "inventory" and (($ARGS.positional | length) == 0 or (.source | IN($ARGS.positional[]))))
+    | if .status == "error" then "インベントリの \(.source) を取得できなかったため照合していません"
+      elif .status == "warn" and .count == 0 then "インベントリの \(.source) が 0 件（要確認）のため照合していません"
+      elif .status == "warn" then "インベントリの \(.source) が要確認のため、照合が漏れているおそれがあります: \(.notes | join("; ") | .[:200])"
+      else empty end' "$INVENTORY_FILE" --args -- "$@"
+}
+
+# add_warn_notes <補足（改行区切り）>
+# 空でない補足を呼び出し側の notes に足し、1 つでもあれば呼び出し側の status を warn にする（呼び出し側の local を書き換える）。
+# inventory_notes の結果や、ソースの要確認の補足に使う
+add_warn_notes() {
+  local note
+  while IFS= read -r note; do
+    if [ -n "$note" ]; then
+      status=warn
+      notes+=("$note")
+    fi
+  done <<<"$1"
+}
+
+# OSV の CVSS v3 のベクターから基本値を計算する jq の定義（OSV はベクターしか返さない）。v4 などは null
+# shellcheck disable=SC2016 # $ は jq の変数
+CVSS3_JQ='
+  def roundup: (. * 100000 | round) as $i
+    | if $i % 10000 == 0 then $i / 100000 else (($i / 10000 | floor) + 1) / 10 end;
+  def cvss3:
+    (split("/")[1:] | map(split(":") | {key: .[0], value: .[1]}) | from_entries) as $m
+    | ($m.S == "C") as $changed
+    | ({N: 0.85, A: 0.62, L: 0.55, P: 0.2}[$m.AV // ""]) as $av
+    | ({L: 0.77, H: 0.44}[$m.AC // ""]) as $ac
+    | ((if $changed then {N: 0.85, L: 0.68, H: 0.5} else {N: 0.85, L: 0.62, H: 0.27} end)[$m.PR // ""]) as $pr
+    | ({N: 0.85, R: 0.62}[$m.UI // ""]) as $ui
+    | ([$m.C, $m.I, $m.A] | map({H: 0.56, L: 0.22, N: 0}[. // ""])) as $cia
+    | if ([$av, $ac, $pr, $ui] + $cia | any(. == null)) or ($m.S | IN("U", "C") | not) then null
+      else (1 - (1 - $cia[0]) * (1 - $cia[1]) * (1 - $cia[2])) as $iss
+      | (if $changed then 7.52 * ($iss - 0.029) - 3.25 * pow($iss - 0.02; 15) else 6.42 * $iss end) as $impact
+      | if $impact <= 0 then 0
+        else [($impact + 8.22 * $av * $ac * $pr * $ui) * (if $changed then 1.08 else 1 end), 10] | min | roundup end
+      end;
+  def cvss_score:
+    if type == "string" and startswith("CVSS:3") then cvss3 else null end;
+'
+
+# npm / pnpm / uv / gem の全件を OSV の querybatch で照合し、該当した脆弱性の詳細を /v1/vulns/<id> で取る（§5.1）。
+# 項目は「パッケージ × 脆弱性」ごと。詳細を取れなかった脆弱性も id だけで項目に残し、warn にする
+layer2_osv() {
+  local all="$WORK_DIR/osv-all.json" packages="$WORK_DIR/osv-packages.json" query="$WORK_DIR/osv-query.json"
+  local batch="$WORK_DIR/osv-batch.json" results="$WORK_DIR/osv-results.jsonl" matches="$WORK_DIR/osv-matches.json"
+  local ids="$WORK_DIR/osv-ids.json" list="$WORK_DIR/osv-vulns.tsv" report="$WORK_DIR/osv-report.tsv"
+  local details="$WORK_DIR/osv-details.json" text total i n evidence status=ok file rc
+  local notes=() files=()
+  ensure_inventory
+  text="$(inventory_notes npm pnpm uv gem)"
+  add_warn_notes "$text"
+  inventory_items npm pnpm uv gem |
+    jq -c 'map(. + {ecosystem: {npm: "npm", pnpm: "npm", uv: "PyPI", gem: "RubyGems"}[.kind]})' >"$all"
+  # バージョン不明のパッケージは項目ごとの要確認（インベントリの review）なので warn にしない
+  text="$(jq -r '[.[] | select(.version == null) | "\(.kind) \(.name)"] | join(", ")' "$all")"
+  if [ -n "$text" ]; then
+    notes+=("バージョン不明のため照合していません: $text")
+  fi
+  jq -c 'map(select(.version != null))' "$all" >"$packages"
+  total="$(jq length "$packages")"
+  : >"$results"
+  for ((i = 0; i < total; i += OSV_BATCH)); do
+    jq -c --argjson i "$i" --argjson n "$OSV_BATCH" '{queries: [.[$i:$i + $n][] | {package: {name, ecosystem}, version}]}' \
+      "$packages" >"$query"
+    fetch_source osv layer2 "$OSV_URL/v1/querybatch" "$batch" \
+      -H 'Content-Type: application/json' --data-binary "@$query" || return 0
+    n="$(jq '.queries | length' "$query")"
+    jq -c --argjson n "$n" 'if (.results | type) == "array" and (.results | length) == $n then .results[]
+      else error("OSV の応答の件数が問い合わせ（\($n) 件）と合いません") end' "$batch" >>"$results"
+  done
+  jq -s -c --slurpfile packages "$packages" '[to_entries[] | select((.value.vulns // []) | length > 0)
+    | {package: $packages[0][.key], ids: [.value.vulns[].id], more: (.value.next_page_token != null)}]' "$results" >"$matches"
+  text="$(jq -r '[.[] | select(.more) | .package.name] | join(", ")' "$matches")"
+  if [ -n "$text" ]; then
+    status=warn
+    notes+=("該当が多く、一部しか取得できていません: $text")
+  fi
+  jq -c '[.[].ids[]] | unique' "$matches" >"$ids"
+  jq -r --arg url "$OSV_URL" --arg dir "$WORK_DIR" 'to_entries[] | "\($url)/v1/vulns/\(.value)\t\($dir)/osv-vuln-\(.key).json"' \
+    "$ids" >"$list"
+  fetch_many "$list" >"$report"
+  while IFS=$'\t' read -r file rc _; do
+    if [ "$rc" = 0 ] && [ -s "$file" ]; then
+      files+=("$file")
+    fi
+  done <"$report"
+  # 詳細は「保存先 → 要点」の JSON にする（affected はパッケージと修正版だけ残す）。
+  # 修正版は ECOSYSTEM と SEMVER の範囲だけから取る（GIT の範囲の値はコミットの SHA。§5.1）
+  jq -n -c "$CVSS3_JQ"'[inputs | {key: input_filename, value: {
+      aliases: (.aliases // []),
+      summary: (.summary // (.details // "" | split("\n")[0] | .[:200] | select(. != "")) // null),
+      severity: [.severity[]? | {type, score: (.score | cvss_score), vector: .score}],
+      rating: (.database_specific.severity? // null),
+      affected: [.affected[]? | {package, fixed: [.ranges[]? | select(.type | IN("ECOSYSTEM", "SEMVER")) | .events[]?
+        | .fixed? // empty]}]}}] | from_entries' \
+    ${files[@]+"${files[@]}"} </dev/null >"$details"
+  text="$(jq -r --slurpfile details "$details" --arg dir "$WORK_DIR" \
+    '[to_entries[] | select($details[0]["\($dir)/osv-vuln-\(.key).json"] == null) | .value] | join(", ")' "$ids")"
+  if [ -n "$text" ]; then
+    status=warn
+    notes+=("詳細を取得できませんでした（id のみ）: $text")
+  fi
+  evidence="$(jq -c --arg url "$OSV_URL/v1/querybatch" --argjson queried "$total" \
+    '{url: $url, queried: $queried, vulnerable_packages: length, vulns: ([.[].ids[]] | unique | length)}' "$matches")"
+  if [ "$total" -eq 0 ] && [ "$status" = ok ]; then
+    notes+=("照合する言語パッケージがありません")
+  fi
+  jq -c --slurpfile details "$details" --slurpfile ids "$ids" --arg dir "$WORK_DIR" '
+    def norm($ecosystem): if $ecosystem == "PyPI" then ascii_downcase | gsub("[-_.]+"; "-") else . end;
+    def version_key: [splits("[^0-9A-Za-z]+")] | map(tonumber? // .);
+    ($ids[0] | to_entries | map({key: .value, value: $details[0]["\($dir)/osv-vuln-\(.key).json"]}) | from_entries) as $by_id
+    | [.[] | .package as $p | .ids[] | . as $id | $by_id[$id] as $d
+      | {kind: $p.kind, name: $p.name, version: $p.version, ecosystem: $p.ecosystem, origin: $p.origin, id: $id,
+         aliases: ($d.aliases // []), summary: ($d.summary // null), severity: ($d.severity // []), rating: ($d.rating // null),
+         fixed: ([$d.affected[]? | select(.package.ecosystem == $p.ecosystem
+                   and (.package.name | norm($p.ecosystem)) == ($p.name | norm($p.ecosystem))) | .fixed[]]
+                 | unique | sort_by(version_key))}]' "$matches" >"$WORK_DIR/osv-items.json"
+  text="$(jq -r '[.[] | select(any(.severity[]; .score == null and (.vector | tostring | startswith("CVSS:")))
+    and all(.severity[]; .score == null)) | .id] | unique | length' "$WORK_DIR/osv-items.json")"
+  if [ "$text" -gt 0 ]; then
+    notes+=("CVSS v4 などスコアを計算していない脆弱性が ${text} 件（severity はベクターのみ）")
+  fi
+  envelope osv layer2 "$status" "$total" "$evidence" ${notes[@]+"${notes[@]}"} <"$WORK_DIR/osv-items.json"
+}
+
+cmd_osv() {
+  run_source osv layer2 layer2_osv
+}
+
+# latest_result <ソース> <状態> <件数> <evidence の JSON> [補足...]
+# 標準入力の項目（JSON 配列）の installed と latest を version_compare で比べて outdated を入れ、エンベロープを出す。
+# outdated が既にある項目（softwareupdate）は比べない。対応付けできない、バージョン不明、比べられない項目は
+# review（§3.1 の項目ごとの要確認）に理由を入れ、補足に名前を書く。状態は変えない（§5.2）。
+# evidence には照合した件数と outdated、unmapped、review の件数を足す。
+latest_result() {
+  local source="$1" status="$2" count="$3" evidence="$4" items mode installed latest result outdated="" text
+  shift 4
+  items="$(cat)"
+  # 表示用の版が「6.2.11 (43613)」で、最新版（cask など）が「6.2.11.43613」のようにビルド番号を続ける形なら、
+  # インストール済みも「6.2.11.43613」にそろえて比べる（そのまま比べると、同じ版が lt になる）。ビルド番号の違いも比べられる
+  local build_re='^([^[:space:](]+)[[:space:]]*\(([0-9]+)\)$'
+  # 区切りは空白でない文字（\x1f）にする。タブだと空の欄が詰められる
+  while IFS=$'\x1f' read -r mode installed latest; do
+    if [[ "$installed" =~ $build_re ]] && [[ "$latest" == "${BASH_REMATCH[1]}."* ]]; then
+      installed="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+    fi
+    if [ "$mode" = preset ]; then
+      result='"preset"'
+    elif [ -z "$installed" ] || [ -z "$latest" ]; then
+      result=null
+    elif result="$(version_compare "$installed" "$latest" 2>/dev/null)"; then
+      if [ "$result" = lt ]; then
+        result=true
+      else
+        result=false
+      fi
+    else
+      result=null
+    fi
+    outdated="$outdated${outdated:+,}$result"
+  done < <(jq -r '.[] | [(if has("outdated") then "preset" else "compare" end), .installed // "", .latest // ""] | join("\u001f")' <<<"$items")
+  items="$(jq -c --argjson outdated "[$outdated]" 'to_entries | map(.value as $v
+    | (if $outdated[.key] == "preset" then $v.outdated else $outdated[.key] end) as $o
+    | {kind: $v.kind, name: $v.name, installed: $v.installed, latest: $v.latest, outdated: $o,
+       method: $v.method, eol: $v.eol, update_command: $v.update_command, matched: $v.matched,
+       review: (if $v.method == "unmapped" then "対応付けできない（unmapped）"
+         elif $v.installed == null then "インストール済みのバージョンが不明"
+         elif $v.latest == null then "最新版が分からない"
+         elif $o == null then "バージョンを比べられない（\($v.installed) と \($v.latest)）"
+         else null end)})' <<<"$items")"
+  text="$(jq -r '[.[] | select(.method == "unmapped") | "\(.name) \(.installed // "（バージョン不明）")"] | join(", ")' <<<"$items")"
+  if [ -n "$text" ]; then
+    set -- "$@" "対応付けできませんでした（unmapped）: $text"
+  fi
+  text="$(jq -r '[.[] | select(.installed == null) | .name] | join(", ")' <<<"$items")"
+  if [ -n "$text" ]; then
+    set -- "$@" "インストール済みのバージョンが不明: $text"
+  fi
+  text="$(jq -r '[.[] | select(.installed != null and .latest != null and .outdated == null)
+    | "\(.name)（\(.installed) と \(.latest)）"] | join(", ")' <<<"$items")"
+  if [ -n "$text" ]; then
+    set -- "$@" "バージョンを比べられませんでした: $text"
+  fi
+  if [ "$items" = "[]" ]; then
+    set -- "$@" "照合する項目がありません"
+  fi
+  evidence="$(jq -c --argjson items "$items" '. + {checked: ($items | length),
+    outdated: ([$items[] | select(.outdated == true)] | length),
+    unmapped: ([$items[] | select(.method == "unmapped")] | length),
+    review: ([$items[] | select(.review != null)] | length)}' <<<"$evidence")"
+  envelope "$source" layer2 "$status" "$count" "$evidence" "$@" <<<"$items"
+}
+
+# brew-formula の最新版を formulae.brew.sh の formula API から取る（ローカルの brew キャッシュは使わない）。
+# homebrew/core 以外の tap と 404 は unmapped。全件 404 なら URL の誤りとして、404 以外の失敗は 1 件でも error にする
+latest_brew_formula() {
+  local formulae="$WORK_DIR/formulae.json" list="$WORK_DIR/formulae.tsv" report="$WORK_DIR/formulae-report.tsv"
+  local fetched="$WORK_DIR/formulae-fetched.json" api="$WORK_DIR/formulae-api.json" text file rc status=ok evidence
+  local notes=() files=()
+  ensure_inventory
+  text="$(inventory_notes brew-formula)"
+  add_warn_notes "$text"
+  inventory_items brew-formula | jq -c --arg dir "$WORK_DIR" 'to_entries | map(.value + {file: "\($dir)/formula-\(.key).json"})' >"$formulae"
+  jq -r --arg url "$BREW_FORMULA_URL" '.[] | select(.origin == "homebrew/core") | "\($url)/\(.name).json\t\(.file)"' \
+    "$formulae" >"$list"
+  fetch_many "$list" >"$report"
+  # formula ごとの取得結果 {rc, code, error} を足す（取得しなかった tap のものは null）
+  jq -R -n -c --slurpfile formulae "$formulae" '[inputs | split("\t") | select(length > 2)
+    | {key: .[0], value: {rc: .[1], code: .[2], error: (.[3] // "")}}] | from_entries as $r
+    | $formulae[0] | map(. + {fetch: $r[.file]})' "$report" >"$fetched"
+  evidence="$(jq -nc --arg url "$BREW_FORMULA_URL/<formula>.json" '{url: $url}')"
+  text="$(jq -r '[.[] | select(.fetch != null and .fetch.rc != "0" and .fetch.code != "404")
+    | "\(.name): \(.fetch.error)（curl \(.fetch.rc)）"] | .[:3] | join("; ")' "$fetched")"
+  if [ -n "$text" ]; then
+    envelope_error brew-api layer2 "$evidence" "取得に失敗しました: $text"
+    return 0
+  fi
+  if jq -e '[.[] | select(.fetch != null) | .fetch.code] | length > 0 and all(. == "404")' "$fetched" >/dev/null; then
+    envelope_error brew-api layer2 "$evidence" "すべての formula が 404 でした（URL の誤り）"
+    return 0
+  fi
+  while IFS=$'\t' read -r file rc _; do
+    if [ "$rc" = 0 ] && [ -s "$file" ]; then
+      files+=("$file")
+    fi
+  done <"$report"
+  jq -n -c '[inputs | {key: input_filename, value: (if .versions.stable
+    then .versions.stable + (if (.revision // 0) > 0 then "_\(.revision)" else "" end) else null end)}] | from_entries' \
+    ${files[@]+"${files[@]}"} </dev/null >"$api"
+  text="$(jq -r --slurpfile api "$api" '[.[] | select(.fetch != null and .fetch.code != "404" and $api[0][.file] == null)
+    | .name] | join(", ")' "$fetched")"
+  if [ -n "$text" ]; then
+    status=warn
+    notes+=("応答が空か、最新版を読めませんでした: $text")
+  fi
+  text="$(jq -r '[.[] | select(.fetch.code? == "404") | .name] | join(", ")' "$fetched")"
+  if [ -n "$text" ]; then
+    notes+=("formula API に無い（404）: $text")
+  fi
+  text="$(jq -r '[.[] | select(.origin != "homebrew/core") | "\(.name)（\(.origin)）"] | join(", ")' "$formulae")"
+  if [ -n "$text" ]; then
+    notes+=("homebrew/core 以外の tap は formula API に無い: $text")
+  fi
+  jq -c --slurpfile api "$api" 'map($api[0][.file] as $latest
+    | {kind, name, installed: .version, latest: $latest, method: (if $latest then "brew-api" else "unmapped" end), eol: null,
+       update_command: "brew upgrade \(.name)", matched: (if $latest then .name else null end)})' "$formulae" |
+    latest_result brew-api "$status" "$(jq length "$api")" "$evidence" ${notes[@]+"${notes[@]}"}
+}
+
+# .app の無い brew-cask と、App Store 以外の app の最新版を cask API から取る。
+# app は .app 名で cask を対応付ける（brew で入れたかは問わない）。brew で入れたものは brew の記録の cask を優先し、
+# それ以外で候補が複数なら、非推奨でないもの、@ の無いもの（beta などでないもの）、名前の短いものの順に選ぶ
+latest_cask() {
+  local casks="$WORK_DIR/cask.json" targets="$WORK_DIR/cask-targets.json" results="$WORK_DIR/cask-results.json"
+  local url="$BREW_CASK_URL" installed='{}' text note count=0 status=ok evidence
+  local notes=()
+  ensure_inventory
+  text="$(inventory_notes brew-cask app)"
+  add_warn_notes "$text"
+  inventory_items brew-cask app | jq -c 'map(select(.kind == "brew-cask" or .origin != "appstore"))' >"$targets"
+  evidence="$(jq -nc --arg url "$url" '{url: $url}')"
+  if [ "$(jq length "$targets")" -eq 0 ]; then
+    latest_result cask-api "$status" 0 "$evidence" ${notes[@]+"${notes[@]}"} <"$targets"
+    return 0
+  fi
+  if has_command brew; then
+    if load_brew_installed 2>/dev/null; then
+      # brew で入れた cask の「.app 名 → cask」
+      installed="$(jq -c '[.casks[] | .token as $token | .artifacts[]? | objects | select(has("app")) | .app
+        | ((map(objects | .target? | strings) | first) // (map(strings) | first)) | strings
+        | {key: (split("/") | last), value: $token}] | from_entries' "$BREW_JSON")"
+    else
+      status=warn
+      notes+=("brew の記録を読めず、brew で入れた cask を優先できませんでした")
+    fi
+  fi
+  fetch_source cask-api layer2 "$url" "$casks" --compressed || return 0
+  count="$(jq -e 'if type == "array" then length else error("cask API の応答が配列ではありません") end' "$casks")"
+  if [ "$count" -eq 0 ]; then
+    status=warn
+    notes+=("0 件でした（すべての項目が unmapped になります）")
+  fi
+  evidence="$(jq -c --argjson count "$count" '. + {casks: $count}' <<<"$evidence")"
+  jq -c --slurpfile targets "$targets" --argjson installed "$installed" '
+    def app_names: [.artifacts[]? | objects | select(has("app")) | .app
+      | ((map(objects | .target? | strings) | first) // (map(strings) | first)) | strings | split("/") | last];
+    map({token, version: (((.version // "") | tostring | split(",")[0] | select(. != "")) // null),
+         skip: (.deprecated == true or .disabled == true), apps: app_names}) as $casks
+    | (INDEX($casks[]; .token)) as $by_token
+    | (reduce ($casks[] | . as $c | .apps[] | {app: ., cask: $c}) as $e ({}; .[$e.app] += [$e.cask])) as $by_app
+    | [$targets[0][] | . as $t
+      | if $t.kind == "brew-cask" then
+          $by_token[$t.name] as $c
+          | {item: {kind, name, installed: (.version | if . then split(",")[0] else . end), latest: $c.version,
+                    method: (if $c.version then "cask-api" else "unmapped" end),
+                    eol: null, update_command: "brew upgrade --cask \($t.name)", matched: $c.token}, note: null}
+        else
+          ($by_app["\($t.name).app"] // []) as $candidates
+          | $installed["\($t.name).app"] as $brew_token
+          | (if $t.origin == "brew-cask" and ($candidates | any(.token == $brew_token))
+             then ($candidates | map(select(.token == $brew_token)) | first)
+             else ($candidates | sort_by([.skip, (.token | contains("@")), (.token | length), .token]) | first) end) as $c
+          | ($brew_token // $c.token) as $upgrade
+          | {item: {kind, name, installed: .version, latest: $c.version, method: (if $c.version then "cask-api" else "unmapped" end),
+                    eol: null,
+                    update_command: (if $t.origin == "brew-cask" and $upgrade then "brew upgrade --cask \($upgrade)" else "アプリ内の更新" end),
+                    matched: $c.token},
+             note: (if ($candidates | length) > 1
+                    then "\($t.name).app に対応する cask が複数: \($candidates | map(.token) | join(", "))（\($c.token) を採用）"
+                    else null end)}
+        end]' "$casks" >"$results"
+  text="$(jq -r '.[] | .note | strings' "$results")"
+  while IFS= read -r note; do
+    if [ -n "$note" ]; then
+      notes+=("$note")
+    fi
+  done <<<"$text"
+  jq -c 'map(.item)' "$results" | latest_result cask-api "$status" "$count" "$evidence" ${notes[@]+"${notes[@]}"}
+}
+
+# App Store のアプリは iTunes Lookup API で bundle id から引く（Mac 版だけを採る）
+latest_itunes() {
+  local targets="$WORK_DIR/itunes-targets.json" out="$WORK_DIR/itunes.json" url text count status=ok evidence
+  local notes=()
+  ensure_inventory
+  text="$(inventory_notes app)"
+  add_warn_notes "$text"
+  inventory_items app | jq -c 'map(select(.origin == "appstore"))' >"$targets"
+  url="$ITUNES_URL?entity=macSoftware&bundleId=$(jq -r '[.[].bundle_id | strings | @uri] | join(",")' "$targets")"
+  evidence="$(jq -nc --arg url "$url" '{url: $url}')"
+  if [ "$(jq length "$targets")" -eq 0 ]; then
+    latest_result itunes "$status" 0 "$evidence" ${notes[@]+"${notes[@]}"} <"$targets"
+    return 0
+  fi
+  fetch_source itunes layer2 "$url" "$out" || return 0
+  count="$(jq -e '.results | if type == "array" then length else error("iTunes Lookup の応答に results がありません") end' "$out")"
+  if [ "$count" -eq 0 ]; then
+    status=warn
+    notes+=("0 件でした")
+  fi
+  jq -c --slurpfile lookup "$out" '
+    ($lookup[0].results | map(select(.kind == "mac-software") | {key: (.bundleId | ascii_downcase), value: .version}) | from_entries) as $versions
+    | map($versions[.bundle_id // "" | ascii_downcase] as $latest
+      | {kind, name, installed: .version, latest: $latest, method: (if $latest then "itunes" else "unmapped" end), eol: null,
+         update_command: "App Store", matched: (if $latest then .bundle_id else null end)})' "$targets" |
+    latest_result itunes "$status" "$count" "$evidence" ${notes[@]+"${notes[@]}"}
+}
+
+# macOS 本体と Safari は softwareupdate --list に更新が出ているかで判定する（Safari だけの更新もある）。
+# 出ていれば outdated: true で、latest はその版。出ていなければ latest はインストール済みの版。
+# macOS はインストール済みと同じメジャー版の更新だけを見る。別のメジャー版へのアップグレードしか無ければ outdated: false で、
+# 補足に書く（同じメジャー版の修正はそのメジャー版の更新として配られる。§5.2）。Safari は古い macOS にも新しいメジャー版で
+# 修正が配られるので、版を問わない。題名やバージョンを読めない更新は warn にし、当たる項目の latest を null にする（review）
+latest_softwareupdate() {
+  local out="$WORK_DIR/softwareupdate.txt" err="$WORK_DIR/softwareupdate.err" items="$WORK_DIR/softwareupdate-items.json"
+  local entries text status=ok evidence parsed=true
+  local notes=()
+  ensure_inventory
+  text="$(inventory_notes macos)"
+  add_warn_notes "$text"
+  softwareupdate --list </dev/null >"$out" 2>"$err" || die "softwareupdate --list が失敗しました: $(tail -n 3 "$err")"
+  # 例: * Label: macOS Tahoe 27.2.1-26C123
+  #     	Title: macOS Tahoe 27.2.1, Version: 27.2.1, Size: 1234567KiB, Recommended: YES, Action: restart,
+  entries="$(jq -R -n -c 'reduce (inputs | capture("^\\* Label: (?<label>.+)$") // capture("^\\s+Title: (?<title>.*?), Version: (?<version>[^,]+)") // empty) as $line
+    ([]; if $line.label then . + [$line] elif length > 0 then .[-1] += $line else . end)' "$out")"
+  evidence="$(jq -nc --argjson updates "$entries" --arg message "$(cat "$out" "$err" | grep -m 1 'No new software available' || true)" \
+    '{command: "softwareupdate --list", updates: $updates, message: ($message | select(. != "") // null)}')"
+  if [ "$entries" = "[]" ] && ! grep -q 'No new software available' "$out" "$err"; then
+    status=warn
+    parsed=false
+    notes+=("softwareupdate --list の出力を解釈できませんでした: $(cat "$out" "$err" | tr '\n' ' ' | cut -c 1-200)")
+  fi
+  text="$(jq -r '[.[] | select(.version == null) | .label] | join(", ")' <<<"$entries")"
+  if [ -n "$text" ]; then
+    status=warn
+    notes+=("題名かバージョンを読めない更新があります（当たる項目は最新版が分からない）: $text")
+  fi
+  # 解釈できなかったときは更新の有無が分からないので latest と outdated を null にする。
+  # 読めない更新は題名（無ければラベル）で項目に当て、当たった項目の latest を null にする。upgrades は補足用（latest_result で落ちる）
+  inventory_items macos | jq -c --argjson updates "$entries" --argjson parsed "$parsed" '
+    def version_key: [splits("[^0-9]+")] | map(tonumber? // 0);
+    def major: split(".")[0];
+    if $parsed | not then map({kind, name, installed: .version, latest: null, outdated: null, method: "softwareupdate", eol: null,
+      update_command: "システム設定 > 一般 > ソフトウェアアップデート", matched: null, upgrades: []}) else
+    map(. as $t
+      | (if $t.name == "Safari" then "^Safari" else "^macOS" end) as $prefix
+      | [$updates[] | select(.version != null and (.title // "" | test($prefix)))] as $candidates
+      | (if $t.name == "Safari" then $candidates else [$candidates[] | select((.version | major) == ($t.version // "" | major))] end) as $same
+      | [$updates[] | select(.version == null and (.title // .label | test($prefix)))] as $unreadable
+      | ($same | sort_by(.version | version_key) | last) as $update
+      | {kind, name, installed: .version,
+         latest: (if ($unreadable | length) > 0 then null else ($update.version // .version) end),
+         outdated: (if $update then true elif ($unreadable | length) > 0 then null else false end),
+         method: "softwareupdate", eol: null,
+         update_command: (if $update then "softwareupdate --install \"\($update.label)\"" else "システム設定 > 一般 > ソフトウェアアップデート" end),
+         matched: $update.label, upgrades: [($candidates - $same)[].title]}) end' >"$items"
+  text="$(jq -r '[.[].upgrades[]] | unique | join(", ")' "$items")"
+  if [ -n "$text" ]; then
+    notes+=("別のメジャー版へのアップグレードがある（インストール済みのメジャー版の更新ではないので outdated にしない）: $text")
+  fi
+  latest_result softwareupdate "$status" "$(jq length <<<"$entries")" "$evidence" ${notes[@]+"${notes[@]}"} <"$items"
+}
+
+# rbenv の Ruby は endoflife.date で同じサイクル（3.3 など）の最新パッチと EOL を取る。ruby 以外（jruby など）は unmapped
+latest_endoflife() {
+  local targets="$WORK_DIR/eol-targets.json" out="$WORK_DIR/eol-ruby.json" url="$EOL_URL/ruby.json" text count=0 today status=ok evidence
+  local notes=()
+  ensure_inventory
+  text="$(inventory_notes ruby)"
+  add_warn_notes "$text"
+  inventory_items ruby >"$targets"
+  evidence="$(jq -nc --arg url "$url" '{url: $url}')"
+  if jq -e 'any(.[]; .name == "ruby")' "$targets" >/dev/null; then
+    fetch_source endoflife layer2 "$url" "$out" || return 0
+    count="$(jq -e 'if type == "array" then length else error("endoflife.date の応答が配列ではありません") end' "$out")"
+    if [ "$count" -eq 0 ]; then
+      status=warn
+      notes+=("0 件でした")
+    fi
+  else
+    # 照合する MRI が無ければ引かない。取得しなかったので 0 件でも ok（§5.2）
+    echo '[]' >"$out"
+    text="$(jq -r '[.[] | "\(.name) \(.version)"] | join(", ")' "$targets")"
+    if [ -n "$text" ]; then
+      notes+=("MRI の Ruby が無いため endoflife.date を引いていません（MRI 以外: ${text}）")
+    fi
+  fi
+  evidence="$(jq -c --argjson count "$count" '. + {cycles: $count}' <<<"$evidence")"
+  today="$(now_iso)"
+  today="${today%%T*}"
+  jq -c --slurpfile cycles "$out" 'map((((.version // "") | capture("^(?<cycle>[0-9]+\\.[0-9]+)") | .cycle) // null) as $cycle
+    | (if .name == "ruby" then first($cycles[0][] | select(.cycle == $cycle)) // null else null end) as $c
+    | if $c then
+        {kind, name, installed: .version, latest: $c.latest, method: "endoflife", eol: $c.eol,
+         update_command: "rbenv install \($c.latest)", matched: $cycle}
+      else
+        {kind, name, installed: .version, latest: null, method: "unmapped", eol: null, update_command: null, matched: null}
+      end)' "$targets" >"$WORK_DIR/eol-items.json"
+  text="$(jq -r --arg today "$today" '[.[] | select(.eol == true or (.eol | type) == "string" and .eol <= $today)
+    | "\(.name) \(.installed)（EOL \(.eol)）"] | join(", ")' "$WORK_DIR/eol-items.json")"
+  if [ -n "$text" ]; then
+    notes+=("EOL を過ぎています: $text")
+  fi
+  latest_result endoflife "$status" "$count" "$evidence" ${notes[@]+"${notes[@]}"} <"$WORK_DIR/eol-items.json"
+}
+
+cmd_latest() {
+  run_source brew-api layer2 latest_brew_formula
+  run_source cask-api layer2 latest_cask
+  run_source itunes layer2 latest_itunes
+  run_source softwareupdate layer2 latest_softwareupdate
+  run_source endoflife layer2 latest_endoflife
+}
+
+# 削除済み一覧（Markdown の表「| 拡張 ID | 削除日 | 種別 |」）を読み、インストール済みの拡張と大文字小文字を区別せずに照合する（§5.3）
+layer2_vscode() {
+  local removed="$WORK_DIR/vscode-removed.md" list="$WORK_DIR/vscode-removed.json" text count status=ok evidence
+  local notes=()
+  ensure_inventory
+  text="$(inventory_notes vscode)"
+  add_warn_notes "$text"
+  fetch_source vscode layer2 "$VSCODE_REMOVED_URL" "$removed" --compressed || return 0
+  # 末尾の | が無い行もある。削除日（11/5/2026）は 2026-11-05 にする
+  jq -R -n -c '[inputs | select(startswith("|")) | ltrimstr("|") | split("|") | map(gsub("^\\s+|\\s+$"; ""))
+    | select(length >= 2 and .[0] != "" and .[0] != "Extension Identifier" and (.[0] | test("^:?-+:?$") | not))
+    | {id: .[0],
+       removal_date: (.[1] | (capture("^(?<m>[0-9]{1,2})/(?<d>[0-9]{1,2})/(?<y>[0-9]{4})$")
+         | "\(.y)-\(.m | if length < 2 then "0" + . else . end)-\(.d | if length < 2 then "0" + . else . end)") // .),
+       type: ((.[2] // "") | if . == "" then null else . end)}]' "$removed" >"$list"
+  count="$(jq length "$list")"
+  if [ "$count" -eq 0 ]; then
+    status=warn
+    notes+=("削除済み一覧の表を 1 件も読み取れませんでした")
+  fi
+  inventory_items vscode | jq -c --slurpfile removed "$list" '
+    (reduce $removed[0][] as $r ({}; .[$r.id | ascii_downcase] += [$r])) as $by_id
+    | [.[] | . as $e | ($by_id[$e.name | ascii_downcase] // [])[]
+      | {id: $e.name, version: $e.version, removal_date, type}]' >"$WORK_DIR/vscode-items.json"
+  evidence="$(jq -c --arg url "$VSCODE_REMOVED_URL" --argjson total "$count" --argjson installed "$(inventory_items vscode | jq length)" \
+    '{url: $url, total: $total, installed: $installed, matched: length}' "$WORK_DIR/vscode-items.json")"
+  envelope vscode layer2 "$status" "$count" "$evidence" ${notes[@]+"${notes[@]}"} <"$WORK_DIR/vscode-items.json"
+}
+
+cmd_vscode() {
+  run_source vscode layer2 layer2_vscode
+}
+
+# --- 層1（§6） ---
+# 範囲は固定しない（KEV は全件、RSS は持っている範囲の全部）。取得できた期間を evidence.period に、鮮度の判定に使った
+# 最も新しい日付を evidence.newest に入れ、それが LAYER1_STALE_DAYS 日以上前なら warn にする。
+
+LAYER1_STALE_DAYS=14
+
+# 層1の日付の jq の定義
+# shellcheck disable=SC2016 # $ は jq の変数
+LAYER1_JQ='
+  # ISO 8601 をエポック秒にする（時差が無ければ $zone）。読めなければ null
+  def iso_epoch($zone): if type != "string" then null else
+    (capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})(T(?<t>[0-9]{2}:[0-9]{2})(?<s>:[0-9]{2})?(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?)?$") // null)
+    | if . == null then null else
+        try (("\(.d)T\(.t // "00:00")\(.s // ":00")" | strptime("%Y-%m-%dT%H:%M:%S") | mktime)
+          - ((.z // $zone) | if . == "Z" then 0 else sub(":"; "") as $z
+              | (($z[1:3] | tonumber) * 3600 + ($z[3:5] | tonumber) * 60) * (if $z[0:1] == "-" then -1 else 1 end) end))
+        catch null end end;
+  # 鮮度。最も新しい日付 $newest が $now（エポック秒）より $days 日以上前なら補足を出す。読めなければそれも補足にする
+  def stale_problem($newest; $now; $days; $zone): ($newest | iso_epoch($zone)) as $epoch
+    | if $epoch == null then "最も新しい日付を読めず、更新が止まっていないか確かめられません"
+      elif $now - $epoch >= $days * 86400 then "最も新しい日付が \($newest) で、\($days) 日以上前です（更新が止まっているおそれ）"
+      else empty end;
+  # rss_items の出力から、target に当たる項目（補足では $label と呼ぶ）と、その取得できた期間（period: 最も古い日付と
+  # 最も新しい日付）、RSS 全体の最も新しい日付（newest）、要確認の補足（problems）を出す。項目には公開日（published:
+  # dcterms:issued、無ければ dc:date）を足す。期間と鮮度は RSS の並びの日付（dc:date、無ければ dcterms:issued。JVN では更新日）で見る
+  def rss_summary($now; $days; $zone; $label; target):
+    .total as $total | .unparsed as $unparsed
+    | [.items[] | . + {published: (.issued // .date), epoch: ((.date // .issued) | iso_epoch($zone))}] as $all
+    | [$all[] | select(target)] as $target
+    | ([$all[] | select(.epoch != null)] | max_by(.epoch) | .date // .issued) as $newest
+    | ([$target[] | select(.epoch != null)] | if length == 0 then null
+        else {from: (min_by(.epoch) | .date // .issued), to: (max_by(.epoch) | .date // .issued)} end) as $period
+    | {total: $total, items: $target, period: $period, newest: $newest,
+       problems: [
+         (if $total == 0 then "0 件でした" else empty end),
+         (if $unparsed > 0 or ($all | length) != $total
+          then "RSS の項目を一部読めませんでした（\($total) 件中 \($all | length) 件。読めない要素 \($unparsed) 個）" else empty end),
+         ([$all[] | select(.epoch == null) | .identifier // .link // .about]
+          | if length > 0 then "日付を読めない項目があります: \(join(", "))" else empty end),
+         (if $total > 0 and ($target | length) == 0 then "\($label)が 1 件もありません" else empty end),
+         (if $total > 0 then stale_problem($newest; $now; $days; $zone) else empty end)]};
+'
+
+# 緩い名前一致（§6）の jq の定義。英数字のトークンに分けて小文字化し、インベントリの名前のトークンと重なれば候補にする。
+# server や manager のような一般的な語は、無関係な製品と大量に一致して絞り込めなくなるので除く。
+# macOS と Safari は名前に Apple を含まないので apple を足す（KEV の Apple の多くは製品名が Multiple Products）
+# shellcheck disable=SC2016 # $ は jq の変数
+MATCH_JQ='
+  def stopwords: ["a", "an", "and", "the", "of", "for", "on", "in", "to", "with", "by", "from", "via", "or",
+    "multiple", "products", "product", "series", "edition", "editions", "version", "versions", "release",
+    "server", "servers", "client", "clients", "service", "services", "manager", "management", "console", "center", "centre",
+    "portal", "gateway", "web", "http", "https", "ftp", "net", "core", "framework", "runtime", "sdk", "api",
+    "app", "apps", "application", "applications", "desktop", "mobile", "cloud", "platform", "software", "system", "systems",
+    "suite", "enterprise", "professional", "pro", "standard", "community", "plugin", "plugins", "extension", "extensions",
+    "module", "modules", "component", "components", "driver", "drivers", "library", "libraries", "tool", "tools",
+    "utils", "utility", "utilities", "kit", "open", "unit", "test", "connect", "connection", "control", "support", "builder",
+    "protection", "protocol", "session", "cache", "xml", "mail", "data", "file", "files", "user", "users", "admin", "agent",
+    "engine", "interface", "remote", "access", "network", "security", "secure", "firmware", "device", "devices", "multi", "ng",
+    "theme", "language", "pack", "common", "base", "info", "information", "media", "content", "document", "documents",
+    "js", "io", "os", "ui"];
+  def tokens: ascii_downcase | [splits("[^a-z0-9]+")] | map(select(length > 1 and (test("^[0-9]+$") | not))) - stopwords | unique;
+  # インベントリの項目の配列から「トークン → 項目（kind 名前）の配列」を作る
+  def token_index: reduce (.[] | "\(.kind) \(.name)" as $key
+      | (.name | tokens) + (if .kind == "macos" then ["apple"] else [] end) | .[] | {token: ., key: $key}) as $e
+    ({}; .[$e.token] += [$e.key]) | map_values(unique);
+  # $tokens がインベントリと重なれば、入力に tokens（重なったトークン）と matched（一致した項目）を足して出す。
+  # 重ならなければ何も出さない
+  def candidate($index; $tokens): ($tokens | map(select($index[.] != null))) as $hit
+    | select($hit | length > 0) | . + {tokens: $hit, matched: ([$hit[] | $index[.][]] | unique)};
+'
+
+# KEV の全件を読み、ベンダー名と製品名がインベントリと緩く一致するものを候補にする。count は全件数（§6）。
+# 期間は dateAdded の最も古い日と新しい日、鮮度はカタログの dateReleased で見る
+layer1_kev() {
+  local kev="$WORK_DIR/kev.json" index="$WORK_DIR/kev-index.json" items="$WORK_DIR/kev-items.json" text total status=ok evidence
+  local notes=()
+  ensure_inventory
+  text="$(inventory_notes)"
+  add_warn_notes "$text"
+  inventory_items | jq -c "$MATCH_JQ"'token_index' >"$index"
+  fetch_source kev layer1 "$KEV_URL" "$kev" --compressed || return 0
+  total="$(jq -e '.vulnerabilities | if type == "array" then length else error("KEV の応答に vulnerabilities がありません") end' "$kev")"
+  if [ "$total" -eq 0 ]; then
+    status=warn
+    notes+=("0 件でした")
+  fi
+  text="$(jq -r --argjson now "$(now_epoch)" --argjson days "$LAYER1_STALE_DAYS" --arg zone "$(date +%z)" \
+    "$LAYER1_JQ"'stale_problem(.dateReleased; $now; $days; $zone)' "$kev")"
+  if [ -n "$text" ]; then
+    status=warn
+    notes+=("$text")
+  fi
+  # references は notes の URL のうち、CISA の定型の案内と NVD（CVE から引ける）を除いたもの
+  jq -c --slurpfile index "$index" "$MATCH_JQ"'[.vulnerabilities[]
+    | {cve: .cveID, vendor: .vendorProject, product, name: .vulnerabilityName, date_added: .dateAdded,
+       ransomware: .knownRansomwareCampaignUse,
+       references: [.notes // "" | scan("https?://[^ ;]+") | select(test("^https?://([^/]*\\.)?(cisa\\.gov|nvd\\.nist\\.gov)/") | not)]}
+    | candidate($index[0]; "\(.vendor) \(.product)" | tokens)]' "$kev" >"$items"
+  evidence="$(jq -c --arg url "$KEV_URL" --argjson candidates "$(jq length "$items")" \
+    '{url: $url, total: (.vulnerabilities | length), candidates: $candidates, catalog_version: .catalogVersion,
+      date_released: .dateReleased,
+      period: ([.vulnerabilities[].dateAdded | strings] | if length == 0 then null else {from: min, to: max} end),
+      newest: .dateReleased}' "$kev")"
+  envelope kev layer1 "$status" "$total" "$evidence" ${notes[@]+"${notes[@]}"} <"$items"
+}
+
+cmd_kev() {
+  run_source kev layer1 layer1_kev
+}
+
+# RSS 1.0（JVN、JPCERT/CC）の項目から読む要素。項目の区切りに rdf:about を使う
+RSS_XPATH='//*[local-name()="item"]/@*[local-name()="about"]
+  | //*[local-name()="item"]/*[local-name()="title" or local-name()="link" or local-name()="identifier" or local-name()="date"
+    or local-name()="issued" or local-name()="description" or local-name()="references" or local-name()="cpe" or local-name()="cvss"]'
+
+# xmllint --xpath "$RSS_XPATH" の出力（文書順に 1 ノードずつ。属性は「 rdf:about="…"」、要素は 1 つの XML の断片）を項目にまとめる jq。
+# 本文の < は &lt; になっている（CDATA は --nocdata で本文にする）ので、< で始まる行は要素の始まり、それ以外は前の要素の続き。
+# xmllint は数値文字参照を 10 進で出す
+# shellcheck disable=SC2016 # $ は jq の変数
+RSS_JQ='
+  def unescape: if contains("&") | not then . else
+    gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&quot;"; "\"") | gsub("&apos;"; [39] | implode)
+    | gsub("&#(?<n>[0-9]+);"; [.n | tonumber] | implode) | gsub("&amp;"; "&") end;
+  def attributes: if . == "" then {} else
+    [scan("([A-Za-z_][\\w.:-]*)=\"([^\"]*)\"") | {key: (.[0] | sub("^.*:"; "")), value: (.[1] | unescape)}] | from_entries end;
+  reduce inputs as $line ([];
+    if ($line | test("^<[^/]")) or ($line | test("^ [^ =<]*about=\"")) then . + [$line]
+    elif length > 0 then .[-1] += "\n" + $line else . end)
+  | reduce (.[] | capture("^ [^ =<]*about=\"(?<about>[^\"]*)\"$")
+      // capture("^<(?:[A-Za-z_][\\w.-]*:)?(?<name>[A-Za-z_][\\w.-]*)(?<attrs>[^>]*?)(?:/>|>(?<text>[^<]*)</[^>]+>)$")
+      // {unparsed: true}) as $r
+    ({items: [], unparsed: 0};
+      if $r.unparsed then .unparsed += 1
+      elif $r.about then .items += [{about: ($r.about | unescape), fields: []}]
+      elif (.items | length) > 0 then
+        .items[-1].fields += [{name: $r.name, text: (($r.text // "") | unescape), attrs: ($r.attrs | attributes)}]
+      else .unparsed += 1 end)
+  | {total: $total, unparsed, items: [.items[] | .fields as $f
+      | def one($name): first($f[] | select(.name == $name) | .text) // null;
+      {about, title: one("title"), link: one("link"), identifier: one("identifier"), date: one("date"), issued: one("issued"),
+       description: one("description"), references: [$f[] | select(.name == "references") | .attrs + {url: .text}],
+       cpe: [$f[] | select(.name == "cpe") | .text], cvss: [$f[] | select(.name == "cvss") | .attrs]}]}
+'
+
+# rss_items <RSS のファイル> <保存先>
+# fetch_source で取得した RSS 1.0 を xmllint で読み、{total, unparsed, items} を保存先に書く。total は xmllint が数えた項目の数。
+# 項目は {about, title, link, identifier, date, issued, description, references, cpe, cvss}（references と cvss は属性のオブジェクト）。
+# XML として読めなければ失敗する。`||` の左に置かない（set -e が効かなくなり、途中の失敗が素通りする）
+rss_items() {
+  local rss="$1" out="$2" nodes="$1.nodes" total
+  total="$(xmllint --nocdata --xpath 'count(//*[local-name()="item"])' "$rss" 2>"$nodes")" ||
+    die "RSS を XML として読めません: $(head -n 1 "$nodes")"
+  [[ $total =~ ^[0-9]+$ ]] || die "RSS の項目の数を読めません: ${total:-（空）}"
+  if [ "$total" -eq 0 ]; then
+    : >"$nodes"
+  else
+    xmllint --nocdata --xpath "$RSS_XPATH" "$rss" >"$nodes"
+  fi
+  jq -R -n -c --argjson total "$total" "$RSS_JQ" "$nodes" >"$out"
+}
+
+# layer1_jvn_feed <ソース> <URL>
+# JVN iPedia の新着と JVN の RSS が持っている項目のうち、インベントリと緩く一致するものを候補にする。
+# 照合に使うのはタイトルと CPE の製品名。CPE のベンダー名にだけ当たる語（「GoogleのAndroid」の google）は除く。
+# Google や Apple の名前だけで Android や iOS の項目が大量に候補になるのを防ぐ。count は RSS から読んだ件数
+layer1_jvn_feed() {
+  local source="$1" url="$2" rdf="$WORK_DIR/$1.rdf" rss="$WORK_DIR/$1.json" index="$WORK_DIR/$1-index.json"
+  local result="$WORK_DIR/$1-result.json" text status=ok
+  local notes=("更新分は未確認" "RSS が持っている範囲だけを照合（取得できた期間は evidence.period）")
+  ensure_inventory
+  text="$(inventory_notes)"
+  add_warn_notes "$text"
+  inventory_items | jq -c "$MATCH_JQ"'token_index' >"$index"
+  fetch_source "$source" layer1 "$url" "$rdf" --compressed || return 0
+  rss_items "$rdf" "$rss"
+  jq -c --argjson now "$(now_epoch)" --argjson days "$LAYER1_STALE_DAYS" --arg zone "$(date +%z)" \
+    --arg url "$url" --slurpfile index "$index" "$MATCH_JQ$LAYER1_JQ"'
+    # cpe:/a:google:chrome（2.2）と cpe:2.3:a:google:chrome:…（2.3）のベンダー名と製品名
+    def cpe_part($i): split(":") | if .[1] == "2.3" then .[3 + $i] else .[2 + $i] end // "";
+    def match_tokens: (.cpe | map(cpe_part(1)) | join(" ") | tokens) as $products
+      | ("\(.title) \($products | join(" "))" | tokens) - ((.cpe | map(cpe_part(0)) | join(" ") | tokens) - $products);
+    rss_summary($now; $days; $zone; "項目"; true) as $s
+    | [$s.items[] | {id: (.identifier // .link // .about), title, link: (.link // .about), published,
+        cves: ([(.references[] | select(.source == "CVE") | .id), ("\(.title) \(.description // "")" | scan("CVE-[0-9]{4}-[0-9]+"))] | unique),
+        cpe, cvss: (.cvss | sort_by(.version // "" | tonumber? // 0) | last | .score? | tonumber? // null),
+        description: (.description // "" | gsub("<[^>]*>"; " ") | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")
+          | if length > 120 then .[:120] + "…" else . end | select(. != "") // null)}
+      | candidate($index[0]; match_tokens)] as $items
+    | {items: $items, problems: $s.problems,
+       evidence: {url: $url, total: $s.total, candidates: ($items | length), period: $s.period, newest: $s.newest}}' "$rss" >"$result"
+  text="$(jq -r '.problems[]' "$result")"
+  add_warn_notes "$text"
+  jq -c .items "$result" |
+    envelope "$source" layer1 "$status" "$(jq .evidence.total "$result")" "$(jq -c .evidence "$result")" "${notes[@]}"
+}
+
+cmd_jvn() {
+  run_source jvn-ipedia layer1 layer1_jvn_feed jvn-ipedia "$JVN_IPEDIA_URL"
+  run_source jvn layer1 layer1_jvn_feed jvn "$JVN_URL"
+}
+
+# JPCERT/CC の RSS にある注意喚起（Weekly Report などを除く）を全件出す。期間は注意喚起の日付で、鮮度は Weekly Report を
+# 含む RSS 全体の日付で見る。この RSS の日付は dc:date だけで、更新された注意喚起では更新日。count は RSS から読んだ件数
+layer1_jpcert() {
+  local rdf="$WORK_DIR/jpcert.rdf" rss="$WORK_DIR/jpcert.json" result="$WORK_DIR/jpcert-result.json" text status=ok
+  local notes=()
+  fetch_source jpcert layer1 "$JPCERT_URL" "$rdf" --compressed || return 0
+  rss_items "$rdf" "$rss"
+  jq -c --argjson now "$(now_epoch)" --argjson days "$LAYER1_STALE_DAYS" --arg zone "$(date +%z)" \
+    --arg url "$JPCERT_URL" "$LAYER1_JQ"'
+    rss_summary($now; $days; $zone; "注意喚起";
+      (.link // .about // "" | test("/at/")) or (.title // "" | startswith("注意喚起"))) as $s
+    | [$s.items[] | {id: (.identifier // .link // .about), title, link: (.link // .about), published,
+        cves: ([.title // "" | scan("CVE-[0-9]{4}-[0-9]+")] | unique)}] as $items
+    | {items: $items, problems: $s.problems,
+       evidence: {url: $url, total: $s.total, alerts: ($items | length), period: $s.period, newest: $s.newest}}' "$rss" >"$result"
+  text="$(jq -r '.problems[]' "$result")"
+  add_warn_notes "$text"
+  jq -c .items "$result" |
+    envelope jpcert layer1 "$status" "$(jq .evidence.total "$result")" "$(jq -c .evidence "$result")" ${notes[@]+"${notes[@]}"}
+}
+
+cmd_jpcert() {
+  run_source jpcert layer1 layer1_jpcert
+}
+
+# inventory を 1 度だけ実行し、その結果で他のすべてを実行する（§3.4）
+cmd_all() {
+  ensure_inventory
+  jq -c '.[]' "$INVENTORY_FILE"
+  cmd_osv
+  cmd_latest
+  cmd_vscode
+  cmd_kev
+  cmd_jvn
+  cmd_jpcert
+}
+
+cmd_compare() {
+  [ "$#" -eq 2 ] || die "使い方: vulncheck compare A B"
+  version_compare "$1" "$2"
+}
+
+# 最新のレポートの .json のパスを出す（名前が日時なので、名前順の最後が最新）。無ければメッセージを出して 1 を返す
+cmd_latest_report() {
+  local dir="${VULNCHECK_REPORTS_DIR:-$HOME/Documents/vuln-check/reports}" file newest=""
+  for file in "$dir"/*.json; do
+    if [ -f "$file" ]; then
+      newest="$file"
+    fi
+  done
+  [ -n "$newest" ] || die "前回のレポートがありません（$dir に .json がありません）"
+  echo "$newest"
+}
+
+main() {
+  local sub="${1:-}" output save="" dir
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+  case "$sub" in
+    -h | --help | help)
+      usage
+      return 0
+      ;;
+    "")
+      usage >&2
+      return 1
+      ;;
+    compare)
+      cmd_compare "$@"
+      return
+      ;;
+    latest-report)
+      [ "$#" -eq 0 ] || die "latest-report は引数を取りません: $*"
+      cmd_latest_report
+      return
+      ;;
+    inventory | jpcert)
+      [ "$#" -eq 0 ] || die "$sub は引数を取りません: $*"
+      ;;
+    all)
+      case "$*" in
+        "") ;;
+        --save) save=1 ;;
+        *) die "all の引数は --save だけです: $*" ;;
+      esac
+      ;;
+    osv | latest | vscode | kev | jvn)
+      parse_inventory_option "$@"
+      ;;
+    *) die "不明なサブコマンドです: ${sub}（vulncheck --help を見てください）" ;;
+  esac
+  declare -F "cmd_$sub" >/dev/null || die "$sub は未実装です"
+  INVENTORY_FILE="${INVENTORY_FILE:-$WORK_DIR/inventory.json}"
+  if [ -n "${VULNCHECK_NOW:-}" ]; then
+    NOW_EPOCH="$(iso_to_epoch "$VULNCHECK_NOW")" || die "VULNCHECK_NOW を ISO 8601 として解釈できません: $VULNCHECK_NOW"
+  fi
+  output="$WORK_DIR/envelopes.jsonl"
+  "cmd_$sub" >"$output"
+  if [ -z "$save" ]; then
+    jq -s . "$output"
+    return 0
+  fi
+  # --save: skill がシェルのリダイレクトを使わずに済むよう、終了時に消さない一時ディレクトリに書いてパスだけを出す（§3.4）
+  # 前回までの保存先が溜まらないよう、古い vulncheck-all.* を消してから作る
+  dir="${TMPDIR:-/tmp}"
+  rm -rf "${dir%/}"/vulncheck-all.*
+  dir="$(mktemp -d "${dir%/}/vulncheck-all.XXXXXX")"
+  jq -s . "$output" >"$dir/all.json"
+  echo "$dir/all.json"
+}
+
+main "$@"

@@ -34,6 +34,8 @@ CLI ごとに明示呼び出しの記法が異なる。
 - Claude Code: `/nozimin:sync-to-dotfiles`
 - Codex CLI: `$nozimin:sync-to-dotfiles`（CLI の `/skills` で一覧を確認し、`$` で skill を選ぶ）
 
+`vuln-check`（[lib/vuln-check.md](vuln-check.md)）も同じで、Claude Code は `/nozimin:vuln-check`、Codex CLI は `$nozimin:vuln-check`。
+
 Codex では `agents/openai.yaml` の `policy.allow_implicit_invocation: false` を使い、明示的に選んだときだけ skill を実行する。`SKILL.md` の `disable-model-invocation: true` は Claude Code の同じ動作のために残す。
 
 ## skill の追加

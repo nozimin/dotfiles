@@ -62,6 +62,17 @@ Codex CLI:  `$nozimin:sync-to-dotfiles`（`/skills` の一覧から選択）
 - 隠れるのは、この Mac にだけある Brewfile と zsh の項目。Brewfile にあるのにインストールされていないもの（逆向きの差分）は、同じ `id` を書いても表に出る。`lib/` の変更（`lib:<リポジトリからの相対パス>`）はローカル専用にできないので、書いても無視され、警告が出る。
 - 行を消すと、その項目はまた表に出る。
 
+## 脆弱性を調べる
+
+この Mac に入っているアプリやライブラリのうち、脆弱性のあるものを優先度付きで一覧にする（読み取り専用）。
+
+```
+Claude Code: /nozimin:vuln-check
+Codex CLI:  $nozimin:vuln-check
+```
+
+使い方、対象、外部に送る情報は [lib/vuln-check.md](lib/vuln-check.md)。
+
 ## 構成
 
 ```
@@ -82,7 +93,10 @@ lib/
     .claude-plugin/            dotfiles marketplace
     nozimin/                   plugin と skills
       skills/sync-to-dotfiles/scripts/with-repo-lock  承認済み clone を検証して書き込みを直列化
+      skills/vuln-check/       この Mac のアプリやライブラリの脆弱性を調べる（lib/vuln-check.md）
 cmd/install_skills              plugin の登録とインストール
+docs/
+  specs/         仕様書（実装の正。食い違いは実装側を直す）
 ```
 
 ## ツールを追加する
