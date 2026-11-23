@@ -539,6 +539,41 @@ for dir in "$TMP/reports-empty" "$TMP/reports-missing"; do
     fail "latest-report: .json が無い（${dir##*/}）→ 終了コード 1 とメッセージ" "終了コード $RC" "$(cat "$ERR")"
   fi
 done
+# reports-dir: VULNCHECK_REPORTS_DIR が無ければ dotfiles のリポジトリ（~/.config/dotfiles/repo）の output/vuln-check-reports
+mkdir -p "$TMP/home/.config/dotfiles" "$TMP/repo"
+printf '%s\n' "$TMP/repo" >"$TMP/home/.config/dotfiles/repo"
+vulncheck reports-dir
+if [ "$RC" -eq 0 ] && [ "$(cat "$OUT")" = "$TMP/repo/output/vuln-check-reports" ]; then
+  pass "reports-dir: dotfiles のリポジトリの output/vuln-check-reports を出す"
+else
+  fail "reports-dir: dotfiles のリポジトリの output/vuln-check-reports を出す" "終了コード $RC" "$(cat "$OUT")"
+fi
+vulncheck VULNCHECK_REPORTS_DIR="$TMP/reports" reports-dir
+if [ "$RC" -eq 0 ] && [ "$(cat "$OUT")" = "$TMP/reports" ]; then
+  pass "reports-dir: VULNCHECK_REPORTS_DIR があればそれを出す"
+else
+  fail "reports-dir: VULNCHECK_REPORTS_DIR があればそれを出す" "終了コード $RC" "$(cat "$OUT")"
+fi
+# 置き場所が決まらないときは、「前回のレポートが無い」（1）と分けて終了コード 2
+expect_no_repo() {
+  local label="$1" cmd="$2"
+  vulncheck "$cmd"
+  if [ "$RC" -eq 2 ] && [ ! -s "$OUT" ] && grep -q "dotfiles のリポジトリが分かりません" "$ERR"; then
+    pass "$cmd: $label → 終了コード 2 とメッセージ"
+  else
+    fail "$cmd: $label → 終了コード 2 とメッセージ" "終了コード $RC" "$(cat "$ERR")"
+  fi
+}
+touch "$TMP/home/.config/dotfiles/repo.migrating"
+expect_no_repo "clone の移動中（repo.migrating がある）" reports-dir
+rm -f "$TMP/home/.config/dotfiles/repo.migrating"
+printf 'repo\n' >"$TMP/home/.config/dotfiles/repo"
+expect_no_repo "pointer が相対パス" reports-dir
+printf '%s\n%s\n' "$TMP/repo" "$TMP/repo" >"$TMP/home/.config/dotfiles/repo"
+expect_no_repo "pointer が 2 行" reports-dir
+rm -f "$TMP/home/.config/dotfiles/repo"
+expect_no_repo "pointer（.config/dotfiles/repo）が無い" reports-dir
+expect_no_repo "pointer（.config/dotfiles/repo）が無い" latest-report
 # all --save を 2 回実行しても、保存先が溜まらない（前回の vulncheck-all.* を消す）
 vulncheck all --save
 first="$(cat "$OUT")"

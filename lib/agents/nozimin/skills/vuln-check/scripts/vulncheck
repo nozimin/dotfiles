@@ -73,10 +73,11 @@ usage() {
   jvn [--inventory FILE]      JVN iPedia と JVN の RSS から照合候補を出す
   jpcert                      JPCERT/CC の RSS にある注意喚起を出す
   compare A B                 バージョンを比べて lt / eq / gt を出す
-  latest-report               最新のレポートの .json のパスを出す（無ければ失敗）
+  latest-report               最新のレポートの .json のパスを出す（無ければ 1、置き場所が決まらなければ 2）
+  reports-dir                 レポートの置き場所（dotfiles の output/vuln-check-reports）を出す（決まらなければ 2）
   all [--save]                inventory とその他すべてを実行する
 
-出力はエンベロープの JSON 配列（compare と latest-report を除く）。
+出力はエンベロープの JSON 配列（compare、latest-report、reports-dir を除く）。
 --inventory を省略すると、その場で inventory を実行する。
 all --save は、新しく作った一時ディレクトリのファイルに出力を書き、そのパスだけを出す（前回までの保存先は消す）。
 EOF
@@ -1400,9 +1401,44 @@ cmd_compare() {
   version_compare "$1" "$2"
 }
 
-# 最新のレポートの .json のパスを出す（名前が日時なので、名前順の最後が最新）。無ければメッセージを出して 1 を返す
+# レポートの置き場所が決まらないときの終了コード（「前回のレポートが無い」の 1 と分ける）
+EXIT_NO_REPO=2
+
+# レポートの置き場所を出す。VULNCHECK_REPORTS_DIR が無ければ、dotfiles のリポジトリ（~/.config/dotfiles/repo）の output/vuln-check-reports。
+# pointer の確かめ方は cmd/skills_lock.sh と cmd/skills_common.sh に揃える（通常のファイルで 1 行、絶対パス、clone の移動中でない）。
+# 決まらなければ EXIT_NO_REPO で終える
+reports_dir() {
+  local pointer="$HOME/.config/dotfiles/repo" raw repo="" reason=""
+  if [ -n "${VULNCHECK_REPORTS_DIR:-}" ]; then
+    echo "$VULNCHECK_REPORTS_DIR"
+    return
+  fi
+  if [ -e "$pointer.migrating" ] || [ -L "$pointer.migrating" ]; then
+    reason="clone の移動中です（$pointer.migrating があります）"
+  elif [ ! -f "$pointer" ] || [ -L "$pointer" ]; then
+    reason="$pointer が無いか、通常のファイルではありません"
+  else
+    raw="$(cat "$pointer" 2>/dev/null && printf '\001')" || raw=""
+    raw="${raw%$'\001'}"
+    repo="${raw%$'\n'}"
+    case "$repo" in
+      *$'\n'*) reason="$pointer が 1 行ではありません" ;;
+      /*) [ -d "$repo" ] || reason="$pointer の $repo がありません" ;;
+      *) reason="$pointer が絶対パスではありません" ;;
+    esac
+  fi
+  if [ -n "$reason" ]; then
+    printf 'vulncheck: dotfiles のリポジトリが分かりません: %s。cmd/install_skills を実行するか、VULNCHECK_REPORTS_DIR を指定してください\n' "$reason" >&2
+    exit "$EXIT_NO_REPO"
+  fi
+  echo "$repo/output/vuln-check-reports"
+}
+
+# 最新のレポートの .json のパスを出す（名前が日時なので、名前順の最後が最新）。
+# 無ければメッセージを出して 1、レポートの置き場所が決まらなければ EXIT_NO_REPO を返す
 cmd_latest_report() {
-  local dir="${VULNCHECK_REPORTS_DIR:-$HOME/Documents/vuln-check/reports}" file newest=""
+  local dir file newest=""
+  dir="$(reports_dir)" || exit "$EXIT_NO_REPO"
   for file in "$dir"/*.json; do
     if [ -f "$file" ]; then
       newest="$file"
@@ -1433,6 +1469,11 @@ main() {
     latest-report)
       [ "$#" -eq 0 ] || die "latest-report は引数を取りません: $*"
       cmd_latest_report
+      return
+      ;;
+    reports-dir)
+      [ "$#" -eq 0 ] || die "reports-dir は引数を取りません: $*"
+      reports_dir
       return
       ;;
     inventory | jpcert)
