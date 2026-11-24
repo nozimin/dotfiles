@@ -27,7 +27,7 @@ Claude Code で `/nozimin:vuln-check`、Codex CLI で `$nozimin:vuln-check` と�
 
 | 対象 | 照合の方法 |
 |---|---|
-| brew の formula と、.app を持たない cask（`claude-code` など） | formulae.brew.sh の最新版と比べる |
+| brew の formula と、.app を持たない cask（`claude-code` など） | formulae.brew.sh の最新版と比べる。新しい版がある formula は、上流の GitHub のアドバイザリとリリースノートをスクリプトが先に読み、Claude が調べる対象を絞る |
 | `/Applications` と `~/Applications` のアプリ（サブフォルダの中も 3 階層まで） | App Store のものは iTunes Lookup、それ以外は brew の cask の最新版と比べる（brew で入れたかは問わない） |
 | macOS（Safari を含む） | `softwareupdate --list` |
 | Ruby 本体（rbenv） | endoflife.date の同じサイクルの最新パッチと EOL |
@@ -59,6 +59,7 @@ dotfiles のリポジトリの `output/vuln-check-reports/YYYYMMDDhhmmss.md` と
 - OSV.dev（`api.osv.dev`）: 言語パッケージ（npm / pnpm / uv / gem）の名前とバージョン
 - formulae.brew.sh: formula 名（formula ごとに問い合わせるので URL に入る。cask は一覧全体を 1 回取得するだけ）
 - iTunes Lookup（`itunes.apple.com`）: App Store のアプリの bundle id
+- GitHub API（`api.github.com`）: 新しい版がある brew の formula の、上流のリポジトリ名（URL に入る）。`GH_TOKEN`、`GITHUB_TOKEN`、`gh auth token` のどれかでトークンが得られれば、上限を上げるためにそれも送る（api.github.com にだけ）
 - Web 検索と Web ページの取得: エージェントがリリースノートなどを調べるときの、アプリ名とバージョン
 - Claude Code なら Anthropic、Codex なら OpenAI: インベントリとスクリプトの出力（会話の内容として送られる）
 

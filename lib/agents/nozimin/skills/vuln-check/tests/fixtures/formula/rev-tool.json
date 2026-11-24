@@ -1,0 +1,1 @@
+{"name":"rev-tool","tap":"homebrew/core","versions":{"stable":"5.0.0","head":"HEAD","bottle":true},"revision":2,"urls":{"stable":{"url":"https://github.com/example/rev-tool/archive/refs/tags/v5.0.0.tar.gz"}},"homepage":"https://example.com/rev-tool"}

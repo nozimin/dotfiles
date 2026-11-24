@@ -57,6 +57,7 @@ BASE_ENV=(
   VULNCHECK_JVN_URL="file://$FIXTURES/jvn.rdf"
   VULNCHECK_JPCERT_URL="file://$FIXTURES/jpcert.rdf"
   VULNCHECK_VSCODE_REMOVED_URL="file://$FIXTURES/RemovedPackages.md"
+  VULNCHECK_GITHUB_API_URL="file://$FIXTURES/github"
   VULNCHECK_NOW=2026-11-10T12:00:00+09:00
   VULNCHECK_APP_DIRS="$TMP/apps:$TMP/home/Applications"
   FAKE_SOFTWAREUPDATE=none
@@ -326,8 +327,9 @@ vulncheck FAKE_SOFTWAREUPDATE=empty latest --inventory "$INVENTORY"
 expect_status "softwareupdate: 偽のコマンドの出力が空 → warn（他のソースは ok）" softwareupdate warn
 
 vulncheck kev --inventory "$INVENTORY"
-expect "kev: フィクスチャ → ok" 'envelope("kev") | .status == "ok" and .count == 3
-  and any(.items[]; .cve == "CVE-2026-0002" and .matched == ["app Firefox"])'
+expect "kev: フィクスチャ → ok" 'envelope("kev") | .status == "ok" and .count == 5
+  and any(.items[]; .cve == "CVE-2026-0002" and .matched == ["app Firefox"])
+  and any(.items[]; .cve == "CVE-2026-0004") and any(.notes[]; test("累積修正の製品の絞り込みをしていません"))'
 inject kev VULNCHECK_KEV_URL "file://$EMPTY/file" kev --inventory "$INVENTORY"
 
 vulncheck jvn --inventory "$INVENTORY"
@@ -584,6 +586,55 @@ if [ "$RC" -eq 0 ] && [ -s "$second" ] && [ ! -e "$first" ] && [ "$(find "$TMP" 
 else
   fail "all --save: 2 回実行しても vulncheck-all.* は 1 つだけ（前回の保存先を消す）" "終了コード $RC" "$first" "$second"
 fi
+
+# all では latest の結果で KEV を絞る。macOS は偽の softwareupdate（更新なし）で最新版なので、追加から 30 日を過ぎた
+# CVE-2026-0004 は macOS の候補から外れ、30 日以内の CVE-2026-0005 は残る（kev だけの実行では絞らない。2 で確かめる）
+if jq -e "$JQ_DEFS"'envelope("kev") | .evidence.presumed_fixed["macos macOS"] == 1
+    and all(.items[]; .cve != "CVE-2026-0004" or (.matched | index("macos macOS") == null))
+    and any(.items[]; .cve == "CVE-2026-0005" and (.matched | index("macos macOS") != null))' "$second" >/dev/null 2>&1; then
+  pass "all: 最新版の累積修正の製品（macOS）は、追加から 30 日を過ぎた KEV を候補から外し、evidence.presumed_fixed に数える"
+else
+  fail "all: 最新版の累積修正の製品（macOS）は、追加から 30 日を過ぎた KEV を候補から外し、evidence.presumed_fixed に数える" \
+    "$(jq -c "$JQ_DEFS"'envelope("kev") | {evidence, items: [.items[] | {cve, matched}]}' "$second" 2>&1 | cut -c 1-300)"
+fi
+
+step "8b. upstream（フィクスチャ。ネットワークは使わない）"
+# AI が調べずに参考へ回す none と revision は、見逃しにつながるので、当たる根拠が 1 つでもあれば none にしないことを確かめる
+UPSTREAM_INVENTORY="$FIXTURES/inventory-upstream.json"
+vulncheck latest --inventory "$UPSTREAM_INVENTORY"
+expect "upstream: 一部（gone-tool）を取得できない → warn、その項目は unknown、他は振り分ける" \
+  'envelope("upstream") | .status == "warn" and any(.notes[]; test("gone-tool"))
+    and (item("gone-tool") | .verdict == "unknown" and (.reason | test("取得できなかった")))'
+expect "upstream: 範囲内のアドバイザリ → advisory。範囲の外、下限だけで修正版が古い、取り下げは除く" \
+  'envelope("upstream") | item("adv-tool") | .verdict == "advisory" and ([.advisories[].id] == ["GHSA-aaaa-aaaa-aaaa"])
+    and .advisories[0].affected == true and .advisories[0].score == 9.8'
+expect "upstream: 範囲内のリリースノートに CVE → release-notes（プレリリースは読まない）" \
+  'envelope("upstream") | item("notes-tool") | .verdict == "release-notes" and ([.hits[].tag] == ["v2.2.0"])
+    and (.hits[0].lines[0] | test("CVE-2026-0001")) and .releases == ["v2.2.0", "v2.1.0"]'
+expect "upstream: 範囲内に語が無く、インストール済みまで遡れる → none（インストール済みより古い版の語は数えない）" \
+  'envelope("upstream") | item("quiet-tool") | .verdict == "none" and .covered == true and .hits == []'
+expect "upstream: revision だけの更新 → revision（取得しない）" \
+  'envelope("upstream") | item("rev-tool") | .verdict == "revision" and .urls == []'
+expect "upstream: git の書き方の範囲（「,」が「どれか」の意味、2.55.0-2.56.2 のような範囲）→ 当たらないとはせず unknown（アドバイザリを残す）" \
+  'envelope("upstream") | item("list-tool") | .verdict == "unknown"
+    and ([.advisories[] | select(.affected == null) | .id] == ["GHSA-eeee-eeee-eeee", "GHSA-ffff-ffff-ffff"])
+    and (.reason | test("比べられない"))'
+expect "upstream: リリースが無い、遡れない、リリースノートが空、上流が GitHub でない → unknown と理由" \
+  'envelope("upstream") | (item("norel-tool").reason | test("リリースが無い")) and (item("far-tool").reason | test("遡れない"))
+    and (item("empty-tool").reason | test("空")) and (item("jq").reason | test("リポジトリが分からない"))
+    and ([.items[] | select(.verdict == "unknown")] | length) == 6'
+expect "upstream: GitHub 以外には認証しない（evidence.authenticated は false）" 'envelope("upstream").evidence.authenticated == false'
+vulncheck VULNCHECK_GITHUB_API_URL="$MISSING" latest --inventory "$UPSTREAM_INVENTORY"
+expect_status "upstream: 存在しない URL（すべて取得できない）→ error（他のソースは ok）" upstream error
+mkdir -p "$TMP/github-empty"
+cp -R "$FIXTURES/github/repos" "$TMP/github-empty/"
+: >"$TMP/github-empty/repos/example/quiet-tool/releases"
+vulncheck VULNCHECK_GITHUB_API_URL="file://$TMP/github-empty" latest --inventory "$UPSTREAM_INVENTORY"
+expect "upstream: 応答が空 → warn、その項目は unknown（none にしない）" \
+  'envelope("upstream") | .status == "warn" and any(.notes[]; test("応答が空.*quiet-tool")) and item("quiet-tool").verdict == "unknown"'
+vulncheck "$(with_fake curl)" latest --inventory "$UPSTREAM_INVENTORY"
+expect "upstream: brew-api が error → ok のまま、notes に照合していない旨（ソース異常を二重に数えない）" \
+  'envelope("upstream") | .status == "ok" and .items == [] and any(.notes[]; test("brew-api の結果が無い"))'
 
 step "まとめ"
 if [ "${#FAILED[@]}" -gt 0 ]; then

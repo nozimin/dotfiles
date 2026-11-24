@@ -40,6 +40,7 @@ set -euo pipefail
   JVN_URL="${VULNCHECK_JVN_URL:-https://jvn.jp/rss/jvn.rdf}"
   JPCERT_URL="${VULNCHECK_JPCERT_URL:-https://www.jpcert.or.jp/rss/jpcert.rdf}"
   VSCODE_REMOVED_URL="${VULNCHECK_VSCODE_REMOVED_URL:-https://raw.githubusercontent.com/microsoft/vsmarketplace/main/RemovedPackages.md}"
+  GITHUB_API_URL="${VULNCHECK_GITHUB_API_URL:-https://api.github.com}"
 }
 
 FETCH_TIMEOUT=60
@@ -67,7 +68,7 @@ usage() {
 
   inventory                   インベントリを集める
   osv [--inventory FILE]      言語パッケージを OSV で照合する
-  latest [--inventory FILE]   brew・アプリ・OS・ランタイムを最新版と比べる
+  latest [--inventory FILE]   brew・アプリ・OS・ランタイムを最新版と比べる（古い formula は上流の GitHub で振り分ける）
   vscode [--inventory FILE]   VS Code 拡張を削除済み一覧と照合する
   kev [--inventory FILE]      KEV から照合候補を出す
   jvn [--inventory FILE]      JVN iPedia と JVN の RSS から照合候補を出す
@@ -240,9 +241,11 @@ parse_inventory_option() {
 }
 
 # バージョン比較（§7）の awk。ARGV[1] と ARGV[2] を比べて lt / eq / gt を出す。比べられなければメッセージを出して 2 で終わる。
+# -v batch=1 なら標準入力の各行を比べる（version_compare_batch）。
 # 版を「数字の並び」と「英字の並び」の要素に分け、先頭から 1 つずつ比べる（9.9p1 は 9 9 p 1、1.0.0rc1 は 1 0 0 rc 1）。
 # 同じ位置の要素の大小: プレリリースの印 < 版の終わり < それ以外の英字（リリース後の印）< 数字。
 # 版の終わりは数字の 0 と同じに扱う（1.0 eq 1.0.0）。印どうしは順位で、英字どうしは辞書順で、数字どうしは数として比べる
+# shellcheck disable=SC2016 # $ は awk のフィールド
 VERSION_AWK='
   # 版 s を要素に分け、種別（pre / post / num）を kind[i] に、値を value[i] に入れて要素の数を返す。
   # 比べられなければ理由を why に入れて -1 を返す
@@ -294,19 +297,12 @@ VERSION_AWK='
     else { x = x ""; y = y "" }
     return x < y ? -1 : (x > y ? 1 : 0)
   }
-  function fail(s) {
-    printf "vulncheck: 比べられないバージョンです（%s）: %s\n", why, s > "/dev/stderr"
-    exit 2
-  }
-  BEGIN {
-    RANK["dev"] = 0
-    RANK["alpha"] = RANK["a"] = 1
-    RANK["beta"] = RANK["b"] = 2
-    RANK["pre"] = RANK["preview"] = RANK["c"] = RANK["rc"] = 3
-    na = parse(ARGV[1], ka, va)
-    if (na < 0) fail(ARGV[1])
-    nb = parse(ARGV[2], kb, vb)
-    if (nb < 0) fail(ARGV[2])
+  # a と b を比べて lt / eq / gt を返す。比べられなければ、比べられない方を bad に入れて空を返す
+  function compare(a, b,    na, nb, ka, va, kb, vb, i, x, y, r) {
+    na = parse(a, ka, va)
+    if (na < 0) { bad = a; return "" }
+    nb = parse(b, kb, vb)
+    if (nb < 0) { bad = b; return "" }
     r = 0
     for (i = 1; r == 0 && (i <= na || i <= nb); i++) {
       x = i <= na ? ka[i] : "end"
@@ -316,8 +312,26 @@ VERSION_AWK='
       if (x != y) r = order(x) < order(y) ? -1 : 1
       else r = compare_values(x, va[i], vb[i])
     }
-    print (r < 0 ? "lt" : (r > 0 ? "gt" : "eq"))
+    return r < 0 ? "lt" : (r > 0 ? "gt" : "eq")
   }
+  BEGIN {
+    RANK["dev"] = 0
+    RANK["alpha"] = RANK["a"] = 1
+    RANK["beta"] = RANK["b"] = 2
+    RANK["pre"] = RANK["preview"] = RANK["c"] = RANK["rc"] = 3
+    # batch=1 なら標準入力の各行「A<TAB>B」を比べ、1 行ずつ lt / eq / gt（比べられなければ na）を出す
+    if (batch) FS = "\t"
+    else {
+      r = compare(ARGV[1], ARGV[2])
+      if (r == "") {
+        printf "vulncheck: 比べられないバージョンです（%s）: %s\n", why, bad > "/dev/stderr"
+        exit 2
+      }
+      print r
+      exit 0
+    }
+  }
+  { r = compare($1, $2); print (r == "" ? "na" : r) }
 '
 
 # version_compare <A> <B>
@@ -325,6 +339,13 @@ VERSION_AWK='
 # 空、数字を含まない、区切り以外の記号がある、コミットの SHA のような並びがあるときは、メッセージを出して 2 を返す。
 version_compare() {
   awk "$VERSION_AWK" "$1" "$2"
+}
+
+# version_compare_batch
+# 標準入力の各行「A<TAB>B」を version_compare と同じ規則で比べ、1 行ずつ lt / eq / gt を出す（比べられなければ na）。
+# 1 件ごとに awk を起動すると数千件の比較で遅いため（upstream のリリースとアドバイザリの範囲）
+version_compare_batch() {
+  awk -v batch=1 "$VERSION_AWK"
 }
 
 # --- inventory（§4） ---
@@ -900,6 +921,11 @@ latest_brew_formula() {
   jq -n -c '[inputs | {key: input_filename, value: (if .versions.stable
     then .versions.stable + (if (.revision // 0) > 0 then "_\(.revision)" else "" end) else null end)}] | from_entries' \
     ${files[@]+"${files[@]}"} </dev/null >"$api"
+  # upstream（§5.4）が読む「formula → 上流の GitHub のリポジトリ（owner/repo）」。ソースの URL、HEAD の URL、homepage の順に探す
+  jq -n -c '[inputs | {key: input_filename, value: ([.urls.stable.url?, .urls.head.url?, .homepage]
+    | map(strings | capture("^https?://github\\.com/(?<r>[^/]+/[^/#?]+)").r | sub("\\.git$"; "")) | first)}] | from_entries' \
+    ${files[@]+"${files[@]}"} </dev/null | jq -c --slurpfile formulae "$formulae" \
+    '. as $repos | [$formulae[0][] | {key: .name, value: $repos[.file]}] | from_entries' >"$WORK_DIR/brew-repos.json"
   text="$(jq -r --slurpfile api "$api" '[.[] | select(.fetch != null and .fetch.code != "404" and $api[0][.file] == null)
     | .name] | join(", ")' "$fetched")"
   if [ -n "$text" ]; then
@@ -917,7 +943,8 @@ latest_brew_formula() {
   jq -c --slurpfile api "$api" 'map($api[0][.file] as $latest
     | {kind, name, installed: .version, latest: $latest, method: (if $latest then "brew-api" else "unmapped" end), eol: null,
        update_command: "brew upgrade \(.name)", matched: (if $latest then .name else null end)})' "$formulae" |
-    latest_result brew-api "$status" "$(jq length "$api")" "$evidence" ${notes[@]+"${notes[@]}"}
+    latest_result brew-api "$status" "$(jq length "$api")" "$evidence" ${notes[@]+"${notes[@]}"} |
+    tee "$WORK_DIR/brew-api.json"
 }
 
 # .app の無い brew-cask と、App Store 以外の app の最新版を cask API から取る。
@@ -1117,8 +1144,159 @@ latest_endoflife() {
   latest_result endoflife "$status" "$count" "$evidence" ${notes[@]+"${notes[@]}"} <"$WORK_DIR/eol-items.json"
 }
 
+# リリースノートでセキュリティ修正を示す語（§5.4。SKILL の「セキュリティ修正」の定義に合わせる）
+UPSTREAM_KEYWORDS='CVE-[0-9]{4}-[0-9]+|GHSA-[0-9a-z]{4}-|security|vulnerab|脆弱性'
+
+# GitHub のアドバイザリの影響範囲と修正版を読む jq の定義。書き方がそろっていない
+# （>= 1.0, < 1.2、>= 0.4.22 AND <= 0.10.15、>=v2.28.0、v2.48.0 <=v2.47.1 …、修正版の v2.48.1 v2.47.2 …）
+UPSTREAM_JQ='
+  # 範囲の条件（演算子と版）の並び。演算子が無ければ「=」と同じ（op は ""）
+  def range_clauses: [scan("(<=|>=|<|>|=)?\\s*([vV]?[0-9][^\\s,|()]*)") | {op: (.[0] // ""), v: .[1]}];
+  def version_tokens: [scan("[vV]?[0-9][^\\s,;|()]*")];
+'
+
+# brew-api で outdated の formula を、上流の GitHub のリポジトリのアドバイザリとリリースノートで振り分ける（§5.4）。
+# 項目の verdict: revision（revision だけの更新）、advisory（インストール済みが影響範囲に入るアドバイザリがある）、
+# release-notes（範囲内のリリースノートに語がある）、none（範囲内のリリースを遡れて、どれも無い）、unknown（reason に理由）。
+# 一部の取得の失敗は、その項目を unknown にして warn。すべて失敗したら error
+latest_upstream() {
+  local targets="$WORK_DIR/upstream-targets.json" list="$WORK_DIR/upstream.tsv" report="$WORK_DIR/upstream-report.tsv"
+  local fetched="$WORK_DIR/upstream-fetched.json" pairs="$WORK_DIR/upstream-pairs.tsv" results="$WORK_DIR/upstream-cmp.tsv"
+  local contents="$WORK_DIR/upstream-contents.json" items="$WORK_DIR/upstream-items.json"
+  local token="" text count status=ok evidence authenticated=false file rc
+  local notes=() auth=() files=()
+  evidence="$(jq -nc --arg url "$GITHUB_API_URL/repos/<owner>/<repo>/{security-advisories,releases}?per_page=100" '{url: $url}')"
+  if [ ! -s "$WORK_DIR/brew-api.json" ] || [ ! -s "$WORK_DIR/brew-repos.json" ]; then
+    echo '[]' | envelope upstream layer2 ok 0 "$evidence" "brew-api の結果が無いため照合していません"
+    return 0
+  fi
+  # 版の比較では brew の revision（_1 など）を除く（上流の版ではないため）
+  jq -c --slurpfile repos "$WORK_DIR/brew-repos.json" --arg dir "$WORK_DIR" '[.items[] | select(.outdated == true)
+    | {kind, name, installed, latest, repo: $repos[0][.name],
+       base_installed: (.installed | sub("_[0-9]+$"; "")), base_latest: (.latest | sub("_[0-9]+$"; ""))}]
+    | to_entries | map(.value + {adv: "\($dir)/upstream-adv-\(.key).json", rel: "\($dir)/upstream-rel-\(.key).json"})' \
+    "$WORK_DIR/brew-api.json" >"$targets"
+  jq -r --arg url "$GITHUB_API_URL" '.[] | select(.repo != null and .base_installed != .base_latest)
+    | "\($url)/repos/\(.repo)/security-advisories?per_page=100\t\(.adv)", "\($url)/repos/\(.repo)/releases?per_page=100\t\(.rel)"' \
+    "$targets" >"$list"
+  # 認証すると上限が 1 時間に 60 回から 5,000 回になる。トークンは api.github.com にだけ送り、引数に出さないようファイルで渡す
+  if [[ $GITHUB_API_URL == https://api.github.com ]]; then
+    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [ -z "$token" ] && has_command gh; then
+      token="$(gh auth token 2>/dev/null)" || token=""
+    fi
+  fi
+  if [ -n "$token" ]; then
+    printf 'Authorization: Bearer %s\n' "$token" >"$WORK_DIR/github-header"
+    auth=(-H "@$WORK_DIR/github-header")
+    authenticated=true
+  fi
+  fetch_many "$list" -H 'Accept: application/vnd.github+json' ${auth[@]+"${auth[@]}"} >"$report"
+  rm -f "$WORK_DIR/github-header"
+  # 項目ごとに、アドバイザリとリリースの取得結果（失敗なら {rc, code}）と中身を足す
+  jq -R -n -c --slurpfile targets "$targets" '[inputs | split("\t") | select(length > 2)
+    | {key: .[0], value: {rc: .[1], code: .[2]}}] | from_entries as $r
+    | $targets[0] | map(. + {adv_fetch: $r[.adv], rel_fetch: $r[.rel]})' "$report" >"$fetched"
+  count="$(jq '[.[] | .adv_fetch, .rel_fetch | select(. != null and .rc == "0")] | length' "$fetched")"
+  text="$(jq -r '[.[] | select((.adv_fetch != null and .adv_fetch.rc != "0") or (.rel_fetch != null and .rel_fetch.rc != "0"))
+    | "\(.name)（\(.repo)。HTTP \([.adv_fetch.code, .rel_fetch.code] | map(select(. != "200")) | unique | join("/"))）"] | join(", ")' "$fetched")"
+  if [ -n "$text" ]; then
+    if [ "$count" -eq 0 ]; then
+      envelope_error upstream layer2 "$evidence" "取得に失敗しました: $text"
+      return 0
+    fi
+    status=warn
+    notes+=("一部を取得できませんでした（その項目は unknown）: $text")
+  fi
+  # 中身から要る部分だけを読む（ファイル → アドバイザリかリリースの配列。配列でなければ null）。
+  # 公開済みで取り下げられていないアドバイザリと、下書きとプレリリースでないリリース。リリースノートは語のある行だけを残す
+  while IFS=$'\t' read -r file rc _; do
+    if [ "$rc" = 0 ] && [ -s "$file" ]; then
+      files+=("$file")
+    fi
+  done <"$report"
+  jq -n -c --arg re "$UPSTREAM_KEYWORDS" '[inputs as $d | {key: input_filename, value: (
+      if ($d | type) != "array" then null
+      elif (input_filename | test("/upstream-adv-")) then [$d[] | select(.state == "published" and .withdrawn_at == null)
+        | {id: .ghsa_id, cve: .cve_id, summary, severity, url: .html_url,
+           score: ([.cvss.score?, .cvss_severities.cvss_v3.score?, .cvss_severities.cvss_v4.score?] | map(numbers | select(. > 0)) | max),
+           vulnerabilities: [.vulnerabilities[]? | {range: .vulnerable_version_range, patched: .patched_versions}]}]
+      else [$d[] | select(.draft != true and .prerelease != true)
+        | {tag: .tag_name, url: .html_url, version: (.tag_name // "" | sub("^[^0-9]*"; "")),
+           hits: ([(.body // "") | split("\n")[] | select(test($re; "i")) | .[:200]] | .[:5]),
+           empty: ((.body // "") | test("\\S") | not)}] end)}] | from_entries' \
+    ${files[@]+"${files[@]}"} </dev/null >"$contents"
+  text="$(jq -r --slurpfile c "$contents" '[.[] | select((.adv_fetch.rc? == "0" and $c[0][.adv] == null)
+    or (.rel_fetch.rc? == "0" and $c[0][.rel] == null)) | .name] | join(", ")' "$fetched")"
+  if [ -n "$text" ]; then
+    status=warn
+    notes+=("応答が空か、配列ではありませんでした（その項目は unknown）: $text")
+  fi
+  # 比べる版の組（アドバイザリの範囲の条件の版・修正版とインストール済み、リリースの版とインストール済み・最新版）をまとめて比べる
+  jq -r --slurpfile c "$contents" "$UPSTREAM_JQ"'.[] | . as $t
+    | ($c[0][$t.adv] // [] | .[].vulnerabilities[] | ((.range // "" | range_clauses[].v), (.patched // "" | version_tokens[]))
+       | "\($t.base_installed)\t\(.)"),
+      ($c[0][$t.rel] // [] | .[].version | select(. != "") | "\(.)\t\($t.base_installed)", "\(.)\t\($t.base_latest)")' \
+    "$fetched" | sort -u >"$pairs"
+  version_compare_batch <"$pairs" >"$pairs.cmp"
+  paste "$pairs" "$pairs.cmp" | jq -R -n -c '[inputs | split("\t") | {key: "\(.[0])\t\(.[1])", value: .[2]}] | from_entries' >"$results"
+  jq -c --slurpfile c "$contents" --slurpfile cmp "$results" --arg url "$GITHUB_API_URL" "$UPSTREAM_JQ"'
+    def cmp($a; $b): $cmp[0]["\($a)\t\($b)"] // "na";
+    # 範囲の条件 1 つ（{op, v}）をインストール済み $i が満たすか。比べられないか、2.51.0-2.51.2 のような範囲なら null
+    def clause($i): cmp($i; .v) as $r
+      | if $r == "na" or (.v | test("\\.[0-9]+-[vV]?[0-9]+\\.")) then null
+        else {"<": ["lt"], "<=": ["lt", "eq"], ">": ["gt"], ">=": ["gt", "eq"], "=": ["eq"], "": ["eq"]}[.op] | index($r) != null end;
+    # 範囲に入るか。|| で区切った組のどれかに入れば true。
+    # 組の中の条件は、「,」が「すべて満たす」の意味のこともあれば（>= 1.0, < 1.2）、「どれか」の意味のこともある
+    # （git の <= 2.50.1, 2.51.0-2.51.2, 2.52.0, …）。そのため、すべて満たせば true、どれも満たさなければ false とし、
+    # 割れたときは、AND と明記してあるか、下限 1 つと上限 1 つの組のときだけ false にする。それ以外と、比べられないときは null
+    def in_range($i): [(. // "") | split("||")[] | . as $g | range_clauses as $cl | [$cl[] | clause($i)]
+        | if length == 0 or any(. == null) then null
+          elif all(. == true) then true
+          elif all(. == false) then false
+          elif ($g | test("\\bAND\\b|&&"))
+            or (($cl | length) == 2 and any($cl[]; .op | IN(">", ">=")) and any($cl[]; .op | IN("<", "<="))) then false
+          else null end]
+      | if any(. == true) then true elif length > 0 and all(. == false) then false else null end;
+    # 脆弱性 1 つ（{range, patched}）にインストール済み $i が当たるか。修正版がすべて $i 以下なら false（範囲が下限だけでも）。
+    # 範囲に入り、修正版がすべて $i より新しい（または修正版が無い）なら true。範囲の外なら false。それ以外は null
+    def affected($i): (.range | in_range($i)) as $r | [.patched // "" | version_tokens[] | cmp($i; .)] as $p
+      | if ($p | length) > 0 and all($p[]; IN("gt", "eq")) then false
+        elif $r == true and all($p[]; . == "lt") then true
+        elif $r == false then false
+        else null end;
+    map(. as $t | $c[0][.adv] as $advs | $c[0][.rel] as $rels
+      | ([$advs // [] | .[] | . + {affected: ([.vulnerabilities[] | affected($t.base_installed)]
+          | if any(. == true) then true elif length > 0 and all(. == false) then false else null end)}
+        | select(.affected != false)]) as $found
+      | ([$rels // [] | .[] | select(cmp(.version; $t.base_installed) == "gt" and (cmp(.version; $t.base_latest) | IN("lt", "eq")))]) as $in_range
+      | ($rels // [] | any(.[]; cmp(.version; $t.base_installed) | IN("lt", "eq"))) as $covered
+      | ([$in_range[] | select(.hits | length > 0) | {tag, url, lines: .hits}]) as $hits
+      | (if .base_installed == .base_latest then {verdict: "revision", reason: null}
+         elif .repo == null then {verdict: "unknown", reason: "上流の GitHub のリポジトリが分からない"}
+         elif $advs == null or $rels == null then {verdict: "unknown", reason: "GitHub から取得できなかった"}
+         elif any($found[]; .affected == true) then {verdict: "advisory", reason: null}
+         elif ($found | length) > 0 then {verdict: "unknown", reason: "アドバイザリの影響範囲を比べられない"}
+         elif ($hits | length) > 0 then {verdict: "release-notes", reason: null}
+         elif ($rels | length) == 0 then {verdict: "unknown", reason: "GitHub のリリースが無い"}
+         elif $covered | not then {verdict: "unknown", reason: "リリースをインストール済みの版まで遡れない（新しい 100 件の範囲外）"}
+         elif ($in_range | length) > 0 and all($in_range[]; .empty) then {verdict: "unknown", reason: "範囲内のリリースノートが空"}
+         else {verdict: "none", reason: null} end) as $v
+      | {kind, name, installed, latest, repo} + $v
+        + {advisories: [$found[] | del(.vulnerabilities) + {ranges: [.vulnerabilities[] | "\(.range) → \(.patched)"]}],
+           releases: [$in_range[].tag], covered: (if $rels == null then null else $covered end), hits: $hits,
+           urls: (if .repo == null or $v.verdict == "revision" then []
+             else ["\($url)/repos/\(.repo)/security-advisories?per_page=100", "\($url)/repos/\(.repo)/releases?per_page=100"] end)})' \
+    "$fetched" >"$items"
+  evidence="$(jq -c --slurpfile items "$items" --argjson authenticated "$authenticated" '. + {authenticated: $authenticated,
+    checked: ($items[0] | length), verdicts: ($items[0] | group_by(.verdict) | map({key: .[0].verdict, value: length}) | from_entries)}' \
+    <<<"$evidence")"
+  envelope upstream layer2 "$status" "$count" "$evidence" ${notes[@]+"${notes[@]}"} <"$items"
+}
+
 cmd_latest() {
   run_source brew-api layer2 latest_brew_formula
+  run_source upstream layer2 latest_upstream
   run_source cask-api layer2 latest_cask
   run_source itunes layer2 latest_itunes
   run_source softwareupdate layer2 latest_softwareupdate
@@ -1229,10 +1407,15 @@ MATCH_JQ='
     | select($hit | length > 0) | . + {tokens: $hit, matched: ([$hit[] | $index[.][]] | unique)};
 '
 
+# 累積修正の製品（"<kind> <name>"）と、最新版のときに確かめる KEV の追加からの日数（§6）
+KEV_CUMULATIVE='["macos macOS", "macos Safari", "app Google Chrome"]'
+KEV_RECENT_DAYS=30
+
 # KEV の全件を読み、ベンダー名と製品名がインベントリと緩く一致するものを候補にする。count は全件数（§6）。
 # 期間は dateAdded の最も古い日と新しい日、鮮度はカタログの dateReleased で見る
 layer1_kev() {
   local kev="$WORK_DIR/kev.json" index="$WORK_DIR/kev-index.json" items="$WORK_DIR/kev-items.json" text total status=ok evidence
+  local uptodate cutoff presumed='{}'
   local notes=()
   ensure_inventory
   text="$(inventory_notes)"
@@ -1256,11 +1439,26 @@ layer1_kev() {
        ransomware: .knownRansomwareCampaignUse,
        references: [.notes // "" | scan("https?://[^ ;]+") | select(test("^https?://([^/]*\\.)?(cisa\\.gov|nvd\\.nist\\.gov)/") | not)]}
     | candidate($index[0]; "\(.vendor) \(.product)" | tokens)]' "$kev" >"$items"
-  evidence="$(jq -c --arg url "$KEV_URL" --argjson candidates "$(jq length "$items")" \
+  # 累積修正の製品（新しい版が過去の修正をすべて含む）が latest で最新版なら、追加から KEV_RECENT_DAYS 日を過ぎた項目は
+  # 修正済みとみなし、その対象を matched から外す（対象が無くなった項目は候補から除く）。外した数は evidence.presumed_fixed。
+  # latest の結果が無い（kev だけを実行した）ときは絞り込まない
+  if [ -s "$WORK_DIR/latest.jsonl" ]; then
+    uptodate="$(jq -s -c --argjson cumulative "$KEV_CUMULATIVE" '[.[] | select(.layer == "layer2") | .items[]
+      | select(.outdated == false) | "\(.kind) \(.name)" | select(IN($cumulative[]))] | unique' "$WORK_DIR/latest.jsonl")"
+    cutoff="$(epoch_to_iso "$(($(now_epoch) - KEV_RECENT_DAYS * 86400))")"
+    jq -c --argjson uptodate "$uptodate" --arg cutoff "${cutoff:0:10}" 'map(
+      if .date_added < $cutoff then (.matched - (.matched - $uptodate)) as $fixed | .matched -= $fixed | .presumed_fixed = $fixed
+      else . end)' "$items" >"$items.tmp"
+    presumed="$(jq -c '[.[] | (.presumed_fixed // [])[]] | group_by(.) | map({key: .[0], value: length}) | from_entries' "$items.tmp")"
+    jq -c 'map(select(.matched | length > 0) | del(.presumed_fixed))' "$items.tmp" >"$items"
+  else
+    notes+=("latest の結果が無いため、累積修正の製品の絞り込みをしていません")
+  fi
+  evidence="$(jq -c --arg url "$KEV_URL" --argjson candidates "$(jq length "$items")" --argjson presumed "$presumed" \
     '{url: $url, total: (.vulnerabilities | length), candidates: $candidates, catalog_version: .catalogVersion,
       date_released: .dateReleased,
       period: ([.vulnerabilities[].dateAdded | strings] | if length == 0 then null else {from: min, to: max} end),
-      newest: .dateReleased}' "$kev")"
+      newest: .dateReleased, presumed_fixed: $presumed}' "$kev")"
   envelope kev layer1 "$status" "$total" "$evidence" ${notes[@]+"${notes[@]}"} <"$items"
 }
 
@@ -1389,7 +1587,8 @@ cmd_all() {
   ensure_inventory
   jq -c '.[]' "$INVENTORY_FILE"
   cmd_osv
-  cmd_latest
+  # kev が累積修正の製品の絞り込み（§6）に使うので、latest の結果を残す
+  cmd_latest | tee "$WORK_DIR/latest.jsonl"
   cmd_vscode
   cmd_kev
   cmd_jvn

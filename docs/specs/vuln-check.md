@@ -23,7 +23,7 @@ lib/vuln-check.md         /vuln-check の使い方
 ```
 
 - dotfiles の plugin `nozimin` の skill として、`cmd/install_skills` で Claude Code と Codex に入れる（lib/skills.md の仕組み。§11）。呼び出しは Claude Code が `/nozimin:vuln-check`、Codex CLI が `$nozimin:vuln-check`。
-- `scripts/vulncheck` は bash で書き、shellcheck を警告なしで通す。依存は OS 付属のもの（`bash` `curl` `jq` `xmllint` `PlistBuddy` `awk` `find` など）と、インベントリ対象のツール自身（`brew` `npm` など）だけ。Python は使わない。
+- `scripts/vulncheck` は bash で書き、shellcheck を警告なしで通す。依存は OS 付属のもの（`bash` `curl` `jq` `xmllint` `PlistBuddy` `awk` `find` など）と、インベントリ対象のツール自身（`brew` `npm` など）だけ。`gh` は GitHub API のトークンを得るためだけに、あれば使う（§5.4）。Python は使わない。
 
 ## 3. `scripts/vulncheck` の共通仕様
 
@@ -77,6 +77,7 @@ lib/vuln-check.md         /vuln-check の使い方
 | `VULNCHECK_JVN_URL` | `https://jvn.jp/rss/jvn.rdf` |
 | `VULNCHECK_JPCERT_URL` | `https://www.jpcert.or.jp/rss/jpcert.rdf` |
 | `VULNCHECK_VSCODE_REMOVED_URL` | `https://raw.githubusercontent.com/microsoft/vsmarketplace/main/RemovedPackages.md` |
+| `VULNCHECK_GITHUB_API_URL` | `https://api.github.com`（`/repos/<owner>/<repo>/security-advisories` と `/releases`。§5.4） |
 
 `VULNCHECK_NOW`（ISO 8601）で「現在時刻」を差し替えられる（層1の鮮度の判定の試験用）。
 `VULNCHECK_APP_DIRS`（`:` 区切り。既定は `/Applications:$HOME/Applications`）で、`app` のインベントリを探す場所を差し替えられる（バージョン不明のアプリなどの試験用）。
@@ -87,7 +88,7 @@ lib/vuln-check.md         /vuln-check の使い方
 |---|---|---|
 | `inventory` | inventory | インベントリを集める（§4） |
 | `osv [--inventory FILE]` | layer2 | 言語パッケージを OSV で照合（§5.1） |
-| `latest [--inventory FILE]` | layer2 | brew・アプリ・OS・ランタイムの最新版と比較（§5.2） |
+| `latest [--inventory FILE]` | layer2 | brew・アプリ・OS・ランタイムの最新版と比較（§5.2）。古い brew の formula は上流の GitHub で振り分ける（§5.4） |
 | `vscode [--inventory FILE]` | layer2 | VS Code 拡張を削除済み一覧と照合（§5.3） |
 | `kev [--inventory FILE]` | layer1 | KEV 全件から照合候補を出す（§6） |
 | `jvn [--inventory FILE]` | layer1 | JVN iPedia と JVN の RSS が持っている範囲（§6） |
@@ -166,6 +167,35 @@ lib/vuln-check.md         /vuln-check の使い方
 - 削除済み一覧（Markdown の表）を読み、インストール済みの拡張 ID と大文字小文字を区別せずに照合する。
 - 項目の形: `{"id", "version", "removal_date", "type"}`。`count` は一覧から読み取った件数。一致 0 件は正常（`ok`）。
 
+### 5.4 brew の formula の上流（`upstream`）
+
+`brew-api` で `outdated: true` の formula を、上流の GitHub のリポジトリのアドバイザリとリリースノートで振り分ける。AI が Web で調べる対象を、判断の要るものだけに減らすため（調べもののほとんどが「アドバイザリを読む → 無ければ参考」で、判断が要らない）。`latest` の中で `brew-api` のあとに実行する。
+
+- 上流のリポジトリは、formula API の JSON のソースの URL、HEAD の URL、homepage の順に、最初の `github.com/<owner>/<repo>` を使う。
+- 取得するのは `GET /repos/<owner>/<repo>/security-advisories?per_page=100` と `GET /repos/<owner>/<repo>/releases?per_page=100`。アドバイザリは公開済みで取り下げられていないもの、リリースは下書きとプレリリースでないものを読む。
+- 版の比較では brew の revision（`_1` など）を除く。リリースの版はタグの最初の数字から後ろ（`rust-v0.172.0` は `0.172.0`）。比較は §7 の規則で、件数が多いので 1 回の `awk` でまとめて比べる。
+- **認証**: 認証なしの上限は 1 時間に 60 回で、1 回の実行で 70 回前後を呼ぶため、`GH_TOKEN`、`GITHUB_TOKEN`、`gh auth token` の順にトークンを探して使う（`gh` は任意。無ければ認証なしで呼ぶ）。トークンは取得元が `https://api.github.com` のときだけ、引数に出さないようファイル経由のヘッダーで送る。`evidence.authenticated` に認証したかを書く。
+- 項目の形: `{"kind", "name", "installed", "latest", "repo", "verdict", "reason", "advisories", "releases", "covered", "hits", "urls"}`。`advisories` はインストール済みが当たるか判定できないものも含め、当たらないもの（`affected: false`）は除く。`releases` は範囲内（インストール済み < 版 ≤ 最新版）のタグ、`hits` は範囲内のリリースノートで語に当たった行（リリースごとに 5 行、1 行 200 文字まで）、`urls` は読んだ API の URL。
+- **`verdict`**（上から順に当てはめる）:
+
+  | verdict | 条件 | skill での扱い |
+  |---|---|---|
+  | `revision` | revision だけの更新（`2.56.0_1` → `2.56.0_3`）。取得しない | 参考 |
+  | `unknown` | 上流が GitHub でない、取得できない（応答が空か配列でないときも） | 従来どおり AI が調べる |
+  | `advisory` | インストール済みが当たるアドバイザリ（`affected: true`）がある | アドバイザリから指摘にする。`hits` も見る |
+  | `unknown` | 当たるか判定できないアドバイザリ（`affected: null`）がある | そのアドバイザリを中心に AI が調べる |
+  | `release-notes` | 範囲内のリリースノートに語（`CVE-…`、`GHSA-…`、security、vulnerab、脆弱性。大文字小文字を区別しない）がある | `hits` の行を読んで判断する |
+  | `unknown` | リリースが無い、取得したリリースがインストール済みの版まで遡れない（新しい 100 件の範囲外）、範囲内のリリースノートがすべて空 | 従来どおり AI が調べる |
+  | `none` | 上のどれでもない | 参考（`urls` を根拠にする） |
+
+  `none` と `revision` は AI が調べずに参考へ回すので、当たる根拠が 1 つでもあれば `none` にしない（見逃しを防ぐ）。語は SKILL の「セキュリティ修正」の定義（ベンダーが明記しているか、ID がある）に合わせる。
+
+- **影響範囲（`affected`）の判定**: アドバイザリの `vulnerable_version_range` と `patched_versions` は書き方がそろっていない（`>= 1.0, < 1.2`、`>= 0.4.22 AND <= 0.10.15`、`>=v2.28.0`、git の `<= 2.50.1, 2.51.0-2.51.2, 2.52.0, …` など）。`,` が「すべて満たす」の意味のことも「どれか」の意味のこともあるので、決めつけない。
+  - 範囲は `||` で区切った組のどれかに入れば入る。組の中の条件は、すべて満たせば入る、どれも満たさなければ入らない。割れたときは、`AND` と明記してあるか、下限 1 つと上限 1 つの組のときだけ入らないとし、それ以外は判定できない（`null`）。`2.51.0-2.51.2` のような範囲の条件と、比べられない版も判定できない。
+  - 修正版がすべてインストール済み以下なら当たらない（範囲が下限だけでも。系列ごとの修正版が並ぶときも）。範囲に入り、修正版がすべてインストール済みより新しい（または修正版が無い）なら当たる。範囲に入らなければ当たらない。それ以外は判定できない。
+- `count` は取得できた応答の数。一部の取得の失敗と、空か配列でない応答は、その項目を `unknown` にして `warn`（`notes` に名前）。すべて失敗したら `error`。`brew-api` が結果を出さなかったときは、`ok` で項目なし、`notes` に照合していない旨（ソース異常を二重に数えない）。
+- `evidence`: `url`（取得する URL の形）、`authenticated`、`checked`（項目の数）、`verdicts`（verdict ごとの件数）。
+
 ## 6. 層1（公開収集）
 
 | ソース | 範囲 | 出すもの |
@@ -175,6 +205,8 @@ lib/vuln-check.md         /vuln-check の使い方
 | JPCERT/CC 注意喚起（RSS） | RSS が持っている範囲 | 注意喚起の全件（件数が少ないため）。Weekly Report は除く |
 
 - **候補の絞り込み**: 文脈を節約するため、スクリプトで緩い名前一致（英数字のトークンに分けて小文字化し、製品名トークンとインベントリ名トークンが重なるか）で候補に絞る。取りこぼしより拾い過ぎを優先する。最終的な対応付けは AI が行う。
+  - ベンダー名の一致を条件にする絞り込みはしない（KEV の Chrome は製品名が `Chromium V8`、Safari は `iOS, iPadOS, and macOS` のように、製品名のトークンが対象と重ならない本物の候補を落とすため）。
+- **累積修正の製品の絞り込み（KEV）**: `all` では、累積修正の製品（新しい版が過去の修正をすべて含むもの。`macos macOS`、`macos Safari`、`app Google Chrome`）が `latest` で最新版（`outdated: false`）なら、`dateAdded` が `VULNCHECK_NOW` の 30 日前より古い項目を修正済みとみなし、その対象を `matched` から外す（対象が無くなった項目は候補から除く）。外した数を対象ごとに `evidence.presumed_fixed` に書く。`kev` だけを実行したとき（`latest` の結果が無い）は絞らず、`notes` にその旨を書く。
 - **取得範囲**: 30 日分などの固定の範囲は求めない（JVN の RSS は 30 日分を持たず、年ごとの一括ファイルは 97MB あり毎回は取得できないため）。取得できた期間（最も古い項目と最も新しい項目の日付）を `evidence.period` に必ず書き、レポートの健全性の表に出す。範囲の外の脆弱性も、インストール済みのものは層2の全件照合で拾う。
 - **鮮度の確認**: ソースが更新を止めていないかを確かめる。最も新しい日付が `VULNCHECK_NOW`（既定は現在時刻）より 14 日以上前なら `warn` にする。見る日付: KEV はカタログの `dateReleased`、JVN iPedia と JVN は項目の日付の最大、JPCERT/CC は Weekly Report を含む RSS 全体の項目の日付の最大。
 
@@ -210,6 +242,7 @@ lib/vuln-check.md         /vuln-check の使い方
 2. **層2の脆弱性の確定**
    - `osv` の項目はそのまま指摘にする。
    - `latest` で `outdated: true` の項目は、**全件**、AI がインストール済みと最新版の間のセキュリティ修正をリリースノートや NVD、ベンダーのアドバイザリで調べる。CVE と修正版を抽出し、`vulncheck compare` で「インストール済み < 修正版」を確かめたものだけを指摘にする。セキュリティ修正が見つからないものは「参考」に回す。
+     - `brew-formula` は `upstream`（§5.4）の `verdict` で分ける。`revision` と `none` は Web で調べずに参考にし、`advisory` はアドバイザリから指摘にする（`hits` も見る）。`release-notes` は `hits` の行で判断し、必要なときだけページを読む。`unknown` は従来どおり調べる。
      - 「セキュリティ修正」は、ベンダーがセキュリティの修正と明記しているか、CVE かアドバイザリ ID が付いているもの。それ以外の修正（例: 境界外書き込みの修正とだけ書かれたもの）は「参考」の補足に書く。
      - macOS 以外（Windows、Android、iOS、Linux）だけに当たる修正は除く。インストールしたものに当たらない修正（Python 版だけの修正、ソースを配布する側の手順の問題など）も除く。
      - **影響範囲の下限**: 影響を受ける版に下限があれば（例: 4.46.0 だけ、4.51.0 から）、「インストール済み ≥ 下限」も `compare` で確かめる。下限の記載が無ければ、修正版より前はすべて影響を受けるとみなす。
@@ -343,6 +376,10 @@ lib/vuln-check.md         /vuln-check の使い方
 7. silent failure の経路（コードレビュー 1 回目の指摘）: cask API が 0 件 → `warn`。URL ごとの取得結果が取れない → 失敗として扱う。ソースがエンベロープを出さずに終わる → `error`。照合に使うインベントリが一部欠けた（`warn` で項目あり）→ 照合する側も `warn`。`softwareupdate` の読めない更新 → `warn` と `review`。別のメジャー版へのアップグレードだけ → `outdated: false`。MRI 以外の Ruby だけ → endoflife は `ok`。rbenv に Ruby が無い → gem は `ok` で、osv と層1に `warn` が広がらない。OSV の `GIT` の範囲の SHA が `fixed` に入らない。
 8. コードレビュー 2 回目の指摘の経路: rbenv のエイリアスを数えない。gem の警告が項目にならない。uv の読み飛ばしの警告で `warn`。formula の一部の取得失敗で `warn` と取得できた分の項目。探す場所がシンボリックリンクでもアプリを拾う。`~/Applications` の VS Code の `code` を使う。cask の `,` 付きのバージョンを比べられる。`softwareupdate` の時間の上限。別のメジャー版の読めない更新を macOS 本体に当てない。`2.0rc1 eq 2.0.0rc1`。同じ cask の `brew-cask` と `app` を二重に出さない。同じ名前のアプリを区別する。`--inventory` に無い kind で `warn`。
 9. レビューの指摘の経路: 表示用の版 `6.2.11 (43613)` と cask の `6.2.11.43613` は `outdated: false`、ビルド番号やマイナー版が新しければ `true`。.app なしの cask の `4.98.0,240000` を比べられる。`latest-report` が最新の `.json` を出し、無ければ終了コード 1。`all --save` を 2 回実行しても `vulncheck-all.*` は 1 つだけ。
+
+10. `upstream`（§5.4。番号は `8b`）: 範囲内のアドバイザリは `advisory`（範囲の外、下限だけで修正版が古いもの、取り下げは除く）。範囲内のリリースノートの CVE は `release-notes`（プレリリースとインストール済みより古い版は読まない）。語が無く遡れれば `none`。revision だけなら `revision`。git の書き方の範囲（`,` が「どれか」の意味、`2.55.0-2.56.2`）は当たらないとはせず `unknown`。リリースが無い、遡れない、リリースノートが空、上流が GitHub でないものは `unknown` と理由。GitHub 以外には認証しない。すべて取得できなければ `error`、一部や空の応答は `warn` とその項目の `unknown`。`brew-api` が `error` なら `ok` で項目なし。
+
+11. KEV の累積修正の製品の絞り込み（§6）: `all` で、最新版の macOS は追加から 30 日を過ぎた KEV を候補から外し、`evidence.presumed_fixed` に数える（当たらない項目は数えない）。30 日以内の項目は残る。`kev` だけの実行では絞らず、`notes` にその旨。
 
 `tests/run` は全項目の結果を表示し、1 つでも失敗すれば終了コード 1。ネットワークが必要な試験（3）はそう明記する。
 最初の本番実行のレポートは、人が見てヤバさの一文と優先度の妥当性を確認する（自動試験の対象外）。
