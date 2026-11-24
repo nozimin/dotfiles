@@ -2,10 +2,13 @@
 
 ## 仕組み
 
-dotfiles の skills は 1 つの Claude Code 形式 plugin `nozimin` にまとめ、Claude Code と Codex の両方にインストールする。marketplace 名は `dotfiles`、plugin ID は `nozimin@dotfiles`。
+dotfiles の skills は Claude Code 形式の plugin にまとめ、Claude Code と Codex の両方にインストールする。marketplace 名は `dotfiles` で、次の 2 つの plugin を入れる。対象の一覧は `cmd/skills_common.sh` の `DOTFILES_PLUGINS` にある。
+
+- `nozimin@dotfiles`（`lib/agents/nozimin/`）: dotfiles 独自の skill と mattpocock/skills から転記した skill。
+- `pstack@dotfiles`（`lib/agents/pstack/`）: cursor/plugins の [pstack](https://github.com/cursor/plugins/tree/main/pstack) を丸ごと転記した plugin。上流の `pstack@cursor-plugins` と同じ名前空間 `pstack:` を使うため、両方を同時に入れない。
 
 - Claude Code はローカル marketplace の plugin をその場所から直接読む。`lib/agents/` を編集した後は、Claude Code で `/reload-plugins` を実行すると反映される。
-- Codex CLI は marketplace を `~/.codex/plugins/cache/dotfiles/nozimin/local/` にコピーする。`lib/agents/nozimin/` に変更があれば、`cmd/install_skills` がコピーを入れ直す。
+- Codex CLI は marketplace を `~/.codex/plugins/cache/dotfiles/<plugin>/<version>/` にコピーする。`<version>` は `.claude-plugin/plugin.json` の `version`（`nozimin` は未指定なので `local`、`pstack` は `0.15.46` など）。`lib/agents/<plugin>/` に変更があれば、`cmd/install_skills` がコピーを入れ直す。
 - 両方ともユーザー全体にインストールするため、どのディレクトリからでも使える。
 - Agent Skills はユーザーごとに 1 組の Claude Code / Codex profile で管理する。初回に使った設定 root は `~/.config/dotfiles/skills-profile` に記録し、`CLAUDE_CONFIG_DIR` または `CODEX_HOME` を別 root に切り替えた installer は global repo pointer を変更する前に停止する。custom root を初めて使う場合も、その root を以後の全移行で使う。profile が記録済みなら、同じ profile で marketplace が外れている場合は再登録できる。初回記録前の既存環境を更新するときは、既存登録がある profile を指定する。sidecar に登録先があるのに選択した profile では登録が見つからない場合は、安全のため停止する。profile ごとの repo pointer は未対応。
 - `cmd/install_skills` は何度実行してもよい。登録済みの手順は `ok` を出して飛ばす。marketplace が以前の clone の場所を指している場合は、現在の clone に登録し直すか確認する。
@@ -38,6 +41,8 @@ CLI ごとに明示呼び出しの記法が異なる。
 
 `review-report`（[lib/review-report.md](review-report.md)）も同じで、Claude Code は `/nozimin:review-report`、Codex CLI は `$nozimin:review-report`。
 
+pstack は plugin 名が `pstack` なので、Claude Code は `/pstack:poteto-mode`、Codex CLI は `$pstack:poteto-mode` で呼び出す。最初に `/pstack:setup-pstack` で使うモデルを選ぶと、`~/.claude/rules/pstack-models.md` に書き込まれる。使い方は同梱の [README](agents/pstack/README.md) と [guide](agents/pstack/docs/guide/README.md) を参照する。上流は Claude Code 用のアダプタ（[docs/harness/claude-code.md](agents/pstack/docs/harness/claude-code.md)）だけを用意しており、Codex 用の対応表はない。
+
 Codex では `agents/openai.yaml` の `policy.allow_implicit_invocation: false` を使い、明示的に選んだときだけ skill を実行する。`SKILL.md` の `disable-model-invocation: true` は Claude Code の同じ動作のために残す。
 
 ## skill の追加
@@ -55,8 +60,8 @@ Claude Code は `/reload-plugins` で反映し、Codex は `cmd/install_skills` 
 
 ## 同梱スキルの更新
 
-`docs/skills/` は `grilling`、`grill-with-docs`、`domain-modeling` と MIT ライセンス表示の管理元・出典記録である。`lib/agents/nozimin/` は CLI に配布するプラグインである。
+`docs/skills/` は `grilling`、`grill-with-docs`、`domain-modeling`、`pstack` と MIT ライセンス表示の管理元・出典記録である。`lib/agents/nozimin/` と `lib/agents/pstack/` は CLI に配布するプラグインである。
 
-上流スキルを更新するときは `docs/skills/` と対応する `lib/agents/nozimin/skills/` の両方を手動で更新し、`docs/skills/UPSTREAM.md` の固定コミットと差分説明も直してからコミットする。MIT ライセンス表示の変更も両方に手動で反映する。
+上流スキルを更新するときは `docs/skills/` と対応する `lib/agents/nozimin/skills/` または `lib/agents/pstack/` の両方を手動で更新し、`docs/skills/UPSTREAM.md` の固定コミットと差分説明も直してからコミットする。MIT ライセンス表示の変更も両方に手動で反映する。
 
 `cmd/install_skills` は管理元と配布コピーを比較する。内容、追加、削除、欠損、ファイル種別の違いを見つけると対象パスを警告するが、配布コピーは変更・削除せず、CLI の通常インストールと Codex キャッシュの更新を続ける。警告が出たら差分を確認し、意図した変更なら両方のコピーを手動で揃える。Codex キャッシュを更新するときは、その後に `cmd/install_skills` を再実行する。

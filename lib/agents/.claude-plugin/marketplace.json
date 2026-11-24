@@ -7,6 +7,10 @@
     {
       "name": "nozimin",
       "source": "./nozimin"
+    },
+    {
+      "name": "pstack",
+      "source": "./pstack"
     }
   ]
 }

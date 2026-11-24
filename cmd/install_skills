@@ -53,8 +53,9 @@ CLAUDE_AVAILABLE=0
 CODEX_AVAILABLE=0
 CLAUDE_MARKETPLACE_PATH=""
 CODEX_MARKETPLACE_PATH=""
-CLAUDE_STATE="missing"
-CODEX_STATE="missing"
+# DOTFILES_PLUGINS と同じ順序で plugin ごとの状態を持つ。
+CLAUDE_STATES=()
+CODEX_STATES=()
 # shellcheck disable=SC2034 # cmd/skills_lock.sh consumes this shared state.
 LOCK_HELD=0
 INITIAL_REPO_POINTER_PRESENT=0
@@ -220,7 +221,12 @@ preflight_claude() {
     error "Claude Code の marketplace JSON を解析できませんでした"
     return 1
   }
-  CLAUDE_STATE="$(claude_plugin_state)" || return 1
+  local plugin_name state
+  CLAUDE_STATES=()
+  for plugin_name in "${DOTFILES_PLUGINS[@]}"; do
+    state="$(claude_plugin_state "$plugin_name")" || return 1
+    CLAUDE_STATES+=("$state")
+  done
 }
 
 preflight_codex() {
@@ -242,7 +248,7 @@ preflight_codex() {
       return 1
     }
     CODEX_MARKETPLACE_PATH="$configured_path"
-    CODEX_STATE="missing"
+    mark_codex_plugins_missing
     rm -f "$CODEX_MARKETPLACE_ERROR_TMP"
     CODEX_MARKETPLACE_ERROR_TMP=""
     return 0
@@ -253,7 +259,28 @@ preflight_codex() {
     error "Codex の dotfiles plugin JSON を解析できませんでした"
     return 1
   }
-  CODEX_STATE="$(codex_plugin_state_from_json "$plugins")" || return 1
+  local plugin_name state
+  CODEX_STATES=()
+  for plugin_name in "${DOTFILES_PLUGINS[@]}"; do
+    state="$(codex_plugin_state_from_json "$plugins" "$plugin_name")" || return 1
+    CODEX_STATES+=("$state")
+  done
+}
+
+mark_claude_plugins_missing() {
+  local plugin_name
+  CLAUDE_STATES=()
+  for plugin_name in "${DOTFILES_PLUGINS[@]}"; do
+    CLAUDE_STATES+=(missing)
+  done
+}
+
+mark_codex_plugins_missing() {
+  local plugin_name
+  CODEX_STATES=()
+  for plugin_name in "${DOTFILES_PLUGINS[@]}"; do
+    CODEX_STATES+=(missing)
+  done
 }
 
 codex_marketplace_manifest_is_valid() {
@@ -375,21 +402,24 @@ begin_pointer_migration() {
 }
 
 install_claude_skills() {
+  local i plugin_name
   if [ "$CLAUDE_AVAILABLE" -eq 0 ]; then
     warn "Claude Code が見つからないため、skills をスキップしました"
     return 0
   fi
 
   if [ -n "$CLAUDE_MARKETPLACE_PATH" ] && [ "$CLAUDE_MARKETPLACE_PATH" != "$CLAUDE_MARKETPLACE" ]; then
-    if [ "$CLAUDE_STATE" != missing ]; then
-      claude plugin uninstall nozimin@dotfiles --scope user >/dev/null 2>&1 || true
-    fi
+    for i in "${!DOTFILES_PLUGINS[@]}"; do
+      if [ "${CLAUDE_STATES[$i]}" != missing ]; then
+        claude plugin uninstall "${DOTFILES_PLUGINS[$i]}@dotfiles" --scope user >/dev/null 2>&1 || true
+      fi
+    done
     claude plugin marketplace remove dotfiles --json >/dev/null || {
       error "Claude Code の古い dotfiles marketplace を削除できませんでした"
       return 1
     }
     CLAUDE_MARKETPLACE_PATH=""
-    CLAUDE_STATE="missing"
+    mark_claude_plugins_missing
   fi
 
   if [ -z "$CLAUDE_MARKETPLACE_PATH" ]; then
@@ -405,23 +435,26 @@ install_claude_skills() {
   CLAUDE_MARKETPLACE_PATH="$CLAUDE_MARKETPLACE"
   record_claude_marketplace_path || return 1
 
-  case "$CLAUDE_STATE" in
-    enabled) ok "Claude Code の nozimin plugin はインストール済み" ;;
-    disabled)
-      claude plugin enable nozimin@dotfiles || {
-        error "Claude Code の nozimin plugin を有効にできませんでした"
-        return 1
-      }
-      ok "Claude Code の nozimin plugin を有効にしました"
-      ;;
-    missing)
-      claude plugin install nozimin@dotfiles --scope user --json >/dev/null || {
-        error "Claude Code に nozimin plugin をインストールできませんでした"
-        return 1
-      }
-      ok "Claude Code の nozimin plugin をインストールしました"
-      ;;
-  esac
+  for i in "${!DOTFILES_PLUGINS[@]}"; do
+    plugin_name="${DOTFILES_PLUGINS[$i]}"
+    case "${CLAUDE_STATES[$i]}" in
+      enabled) ok "Claude Code の $plugin_name plugin はインストール済み" ;;
+      disabled)
+        claude plugin enable "$plugin_name@dotfiles" || {
+          error "Claude Code の $plugin_name plugin を有効にできませんでした"
+          return 1
+        }
+        ok "Claude Code の $plugin_name plugin を有効にしました"
+        ;;
+      missing)
+        claude plugin install "$plugin_name@dotfiles" --scope user --json >/dev/null || {
+          error "Claude Code に $plugin_name plugin をインストールできませんでした"
+          return 1
+        }
+        ok "Claude Code の $plugin_name plugin をインストールしました"
+        ;;
+    esac
+  done
 }
 
 record_claude_marketplace_path() {
@@ -577,6 +610,8 @@ check_vendored_drift() {
     destination="$REPO_ROOT/lib/agents/nozimin/skills/$skill"
     warn_vendored_drift "$source" "$destination"
   done
+  # pstack は LICENSE を含む plugin ツリー全体を管理元と比較する。
+  warn_vendored_drift "$REPO_ROOT/docs/skills/pstack" "$REPO_ROOT/lib/agents/pstack"
 }
 
 check_missing_cli_migrations() {
@@ -667,8 +702,21 @@ record_codex_marketplace_path() {
   CODEX_MARKETPLACE_PATH_TMP=""
 }
 
+# Codex は plugin.json の version 名でキャッシュを作り、version がなければ local を使う。
+codex_plugin_cache_version() {
+  python3 - "$REPO_ROOT/lib/agents/$1/.claude-plugin/plugin.json" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        version = json.load(f).get("version")
+except Exception:
+    version = None
+print(version if isinstance(version, str) and re.fullmatch(r"[0-9A-Za-z._+-]+", version) else "local")
+PY
+}
+
 install_codex_skills() {
-  local cache_dir
+  local i plugin_name cache_dir
   if [ "$CODEX_AVAILABLE" -eq 0 ]; then
     warn "Codex が見つからないため、skills をスキップしました"
     return 0
@@ -684,7 +732,7 @@ install_codex_skills() {
       return 1
     }
     CODEX_MARKETPLACE_PATH=""
-    CODEX_STATE="missing"
+    mark_codex_plugins_missing
   fi
 
   if [ -z "$CODEX_MARKETPLACE_PATH" ]; then
@@ -699,20 +747,25 @@ install_codex_skills() {
   fi
 
   record_codex_marketplace_path || return 1
-  cache_dir="$CODEX_HOME/plugins/cache/dotfiles/nozimin/local"
-  if [ "$CODEX_STATE" = enabled ] &&
-    diff -qr "$REPO_ROOT/lib/agents/nozimin" "$cache_dir" >/dev/null 2>&1 &&
-    codex_cache_executable_modes_match "$REPO_ROOT/lib/agents/nozimin" "$cache_dir"; then
-    ok "Codex の nozimin plugin は最新"
-    return 0
-  fi
+  # preflight は CODEX_HOME がないと状態を読まないため、未取得なら未インストールとして扱う。
+  [ "${#CODEX_STATES[@]}" -eq "${#DOTFILES_PLUGINS[@]}" ] || mark_codex_plugins_missing
+  for i in "${!DOTFILES_PLUGINS[@]}"; do
+    plugin_name="${DOTFILES_PLUGINS[$i]}"
+    cache_dir="$CODEX_HOME/plugins/cache/dotfiles/$plugin_name/$(codex_plugin_cache_version "$plugin_name")"
+    if [ "${CODEX_STATES[$i]}" = enabled ] &&
+      diff -qr "$REPO_ROOT/lib/agents/$plugin_name" "$cache_dir" >/dev/null 2>&1 &&
+      codex_cache_executable_modes_match "$REPO_ROOT/lib/agents/$plugin_name" "$cache_dir"; then
+      ok "Codex の $plugin_name plugin は最新"
+      continue
+    fi
 
-  # `plugin add` refreshes the local cache in place, including removed files.
-  codex plugin add nozimin@dotfiles --json >/dev/null || {
-    error "Codex に nozimin plugin をインストールまたは更新できませんでした"
-    return 1
-  }
-  ok "Codex の nozimin plugin をインストールまたは更新しました"
+    # `plugin add` refreshes the local cache in place, including removed files.
+    codex plugin add "$plugin_name@dotfiles" --json >/dev/null || {
+      error "Codex に $plugin_name plugin をインストールまたは更新できませんでした"
+      return 1
+    }
+    ok "Codex の $plugin_name plugin をインストールまたは更新しました"
+  done
 }
 
 if [ "${DOTFILES_SETUP_LOCK_OWNER_PID:-}" = "$PPID" ] && skills_lock_is_owned_by "$PPID"; then
