@@ -212,26 +212,27 @@ footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--lin
     <h1>review-report の流れ</h1>
     <div class="cmd"><span>$</span>/nozimin:review-report #123</div>
     <p class="lead">
-      コードの変更をレビュー skill でレビューし、結果をマージ判定と 4 つのグループに整理して出します。<br/>
-      レビューそのものはレビュー skill（既定は <code>/code-review</code>）に任せ、この skill は結果の整理と出力を受け持ちます。<br/>
-      対象が PR なら、承認を得てからまとめコメントを 1 件投稿します。
+      コードレビューの結果を整形し、ユーザーが読みやすい形で確認できるようにします。<br/>
+      レビュー観点などはこのskillには盛り込んでません。<br/>
+      基本的に他のレビューskillと組み合わせることで使うことができます。<br/>
+      レビューskillの指定がない場合は既定の物を使います。（ClaudeCodeは <code>/code-review</code>、Codexは <code>codex review</code>）<br/>
+      対象がPRなら、承認を得たうえでレビュー結果をPRにコメントします。
     </p>
     <div class="tags">
-      <span class="tag">マージ判定 ✅ / ⚠️ / 🚫</span>
-      <span class="tag">4 つのグループに整理</span>
+      <span class="tag">マージ可否の判定</span>
+      <span class="tag">指摘内容をグループ化</span>
       <span class="tag">読み取り専用</span>
-      <span class="tag">PR へは承認後に投稿</span>
     </div>
   </header>
 
   <div class="pipeline" aria-label="全体の流れ">
     <ol class="steps">
-      <li><a href="#s1"><span class="n">01</span><span class="t">引数を分ける</span><span class="d">レビュー skill と対象</span></a></li>
-      <li><a href="#s2"><span class="n">02</span><span class="t">レビューする</span><span class="d">既定は /code-review</span></a></li>
-      <li><a href="#s3"><span class="n">03</span><span class="t">項目を作る</span><span class="d">🔴 🟡 🟢 👀</span></a></li>
-      <li><a href="#s4"><span class="n">04</span><span class="t">判定する</span><span class="d">✅ / ⚠️ / 🚫</span></a></li>
-      <li><a href="#s5"><span class="n">05</span><span class="t">チャットに出す</span><span class="d">全文を見出しで</span></a></li>
-      <li class="l1"><a href="#s6"><span class="n">06</span><span class="t">PR に投稿</span><span class="d">対象が PR で承認後だけ</span></a></li>
+      <li><a href="#s1"><span class="n">01</span><span class="t">プロンプトを送信</span><span class="d">レビューして</span></a></li>
+      <li class="l1"><a href="#s2"><span class="n">02</span><span class="t">結果を収集</span><span class="d">普段使のレビューskillと組み合わせる</span></a></li>
+      <li><a href="#s3"><span class="n">03</span><span class="t">グルーピング</span><span class="d">🔴重大/🟠要確認 など</span></a></li>
+      <li><a href="#s4"><span class="n">04</span><span class="t">結論をまとめる</span><span class="d">✅マージOK / <br/>🚫問題あり</span></a></li>
+      <li><a href="#s5"><span class="n">05</span><span class="t">チャットに出力</span><span class="d">結論とグルーピングした指摘</span></a></li>
+      <li class="l1"><a href="#s6"><span class="n">06</span><span class="t">PRに投稿(おまけ)</span><span class="d">承認時のみPRにコメント</span></a></li>
     </ol>
   </div>
 
